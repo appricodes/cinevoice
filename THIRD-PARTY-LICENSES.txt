@@ -1,0 +1,177 @@
+THIRD-PARTY NOTICES for Cinevoice
+======================================
+This file lists every third-party component bundled inside this application
+(the compiled Cinevoice.exe folder), the license each is distributed
+under, and notes on how this application complies with each license's terms.
+It also covers AI models that are downloaded separately by the user at
+runtime for the offline description feature (these are NOT bundled in the
+installer, but are documented here for completeness).
+
+Full license texts for most of these components are also included verbatim
+inside the application's own installation folder, under
+_internal\<package>-<version>.dist-info\licenses\ (or \LICENSE), because pip
+copies each package's official license file into its metadata folder and
+this app's build spec bundles that metadata.
+
+
+1. RUNTIME LIBRARIES BUNDLED IN THE EXE
+----------------------------------------
+
+Qt / PySide6 / PySide6-Essentials / PySide6-Addons / shiboken6  (v6.10.0)
+    License: LGPL-3.0 (also available under GPL-2.0, GPL-3.0, or a paid Qt
+             Commercial license; this app uses the official open-source PyPI
+             wheels under LGPL-3.0)
+    Used for: the entire GUI, video playback (QtMultimedia), and
+              text-to-speech (QtTextToSpeech).
+    Compliance notes:
+      - The app is built with PyInstaller in "onedir" (folder) mode with
+        exclude_binaries=True, so PySide6's Qt DLLs ship as separate files
+        next to the .exe rather than compiled into a single binary blob.
+        This satisfies LGPLv3's requirement that a user be able to replace
+        the LGPL library with a modified/updated version.
+      - No modifications were made to Qt or PySide6 source code; the
+        official unmodified PyPI wheels are used as-is.
+      - Qt's own bundled FFmpeg (used by the QtMultimedia video-playback
+        backend, plugins\multimedia\ffmpegmediaplugin.dll) is built by The
+        Qt Company specifically WITHOUT GPL-only codecs (no libx264/libx265)
+        for their open-source LGPL distribution -- confirmed via Qt's
+        official FFmpeg attribution page. It ships under LGPL-2.1+ plus
+        BSD/MIT/ISC/MPL-2.0 for individual components. No GPL obligation
+        arises from this.
+    License text: https://www.gnu.org/licenses/lgpl-3.0.txt
+                  (also bundled at _internal\pyside6-6.10.0.dist-info\)
+
+OpenVINO / openvino-genai / openvino-tokenizers  (v2026.2.1)
+    License: Apache License 2.0
+    Used for: running offline AI vision-language models on-device (CPU/GPU)
+              for the optional offline description feature.
+    License text: https://www.apache.org/licenses/LICENSE-2.0
+
+opencv-python (cv2)  (v4.12.0.88)
+    License: Apache License 2.0
+    Used for: video frame capture and image resizing/encoding.
+
+NumPy  (v2.2.6)
+    License: BSD 3-Clause
+    Used for: numeric array operations (image frames, OpenVINO tensors).
+
+requests  (v2.32.5)
+    License: Apache License 2.0
+    Used for: HTTP calls to online AI provider APIs and offline-model
+              downloads from Hugging Face.
+
+urllib3  (v2.5.0)
+    License: MIT
+    Used for: HTTP connection pooling/retries (a dependency of requests).
+
+certifi  (bundled)
+    License: Mozilla Public License 2.0 (MPL-2.0)
+    Used for: a trusted root-certificate bundle for HTTPS requests.
+
+charset-normalizer, idna
+    License: MIT
+    Used for: HTTP encoding detection (dependencies of requests).
+
+PyYAML
+    License: MIT
+    Used for: configuration parsing (a dependency of OpenVINO).
+
+tqdm
+    License: MPL-2.0 AND MIT (dual-licensed; choose either)
+    Used for: progress reporting (a dependency of OpenVINO/OpenVINO GenAI).
+
+keyring  (v25.6.0)
+    License: MIT
+    Used for: storing API keys securely in the Windows Credential Manager.
+
+pywin32
+    License: Python Software Foundation-style permissive license
+    Used for: Windows Credential Manager access (a dependency of keyring's
+              Windows backend).
+
+SpeechRecognition  (v3.16.1)
+    License: BSD 2-Clause
+    Used for: converting microphone audio to text for the "Ask Voice
+              Question" feature.
+    Non-license usage note: this library's recognize_google() method calls
+    an unofficial, undocumented free Google Web Speech API endpoint. This is
+    not a license concern, but it is a third-party network service outside
+    Google's supported/guaranteed API surface and could stop working or be
+    rate-limited at any time.
+
+PyAudio  (v0.2.14)
+    License: MIT
+    Used for: microphone capture (a dependency of SpeechRecognition's
+              Microphone class).
+
+
+2. BUILD-TIME-ONLY TOOL (NOT DISTRIBUTED IN THE EXE)
+--------------------------------------------------------
+
+PyInstaller  (v6.20.0)
+    License: GPL-2.0-or-later, WITH the official PyInstaller Bootloader
+             Exception.
+    The exception explicitly states that applications built and distributed
+    using PyInstaller are NOT required to be licensed under the GPL; you may
+    distribute the compiled application (including as closed-source /
+    commercial software) under any license you choose. Only PyInstaller's
+    own source code is GPL-licensed, not your compiled output.
+    Reference: https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt
+
+
+3. REMOVED DEPENDENCY: GPL-LICENSED FFMPEG (IMPORTANT HISTORY NOTE)
+------------------------------------------------------------------------
+An earlier version of this app used the moviepy library (MIT license) for
+extracting audio from video files for a "Translate Audio Segment" feature.
+moviepy depends on imageio-ffmpeg, which bundles a prebuilt ffmpeg.exe binary
+from gyan.dev configured with --enable-gpl --enable-version3 and GPL-only
+encoders (libx264, libx265) -- i.e. a GPLv3-licensed executable.
+
+Distributing that binary would have required either (a) supplying FFmpeg's
+GPL license text and a written offer of its corresponding source code, or
+(b) replacing it with an LGPL-only FFmpeg build. To keep this application's
+own licensing simple and avoid any GPL obligations entirely, the audio
+transcription/translation feature (and moviepy/imageio/imageio-ffmpeg/
+Pillow) has been removed from the app. The "Ask Voice Question" feature is
+unaffected, since it captures microphone audio directly (via PyAudio) and
+never touches ffmpeg.
+
+As a result, this application no longer bundles, links to, or distributes
+any GPL-licensed component.
+
+
+4. AI MODELS DOWNLOADED AT RUNTIME (NOT PART OF THE INSTALLER)
+--------------------------------------------------------------------
+The offline description feature lets the user optionally download
+pre-converted vision-language AI models directly from Hugging Face into
+their own user profile folder (%LOCALAPPDATA%\Cinevoice\models). These
+model weights are fetched by the user's own action, at their own risk, are
+never bundled inside the installer/exe, and are not modified or
+redistributed by this application -- the app only downloads and runs them
+locally.
+
+  - Qwen3-VL and Qwen2.5-VL-7B (official "OpenVINO" org conversions):
+    Apache License 2.0, same as the upstream Qwen models from Alibaba Cloud.
+
+  - "Uncensored" / abliterated community variants (from the "EZCon"
+    Hugging Face account, derived from huihui-ai's abliterated Qwen3-VL
+    fine-tunes): these are derivative works of the Apache-2.0-licensed Qwen3
+    -VL base models. The uploader's repository pages do not always restate
+    an explicit license tag, but as derivatives of an Apache-2.0 work they
+    remain governed by Apache-2.0 terms absent any stated restriction.
+    Users should independently review each model's Hugging Face model card
+    before relying on it for anything beyond personal/experimental use.
+
+
+5. RECOMMENDATION FOR THIS APPLICATION'S OWN LICENSE
+---------------------------------------------------------
+See LICENSE.txt. The MIT License was chosen because:
+  - It is fully compatible with every dependency above (Apache-2.0, BSD,
+    MIT, MPL-2.0, and LGPL-3.0 dynamically linked) -- none of them require
+    your own original code to be released under any particular license.
+  - It is short, extremely well understood, and imposes no obligations on
+    users of your compiled application beyond keeping the copyright notice
+    if they redistribute your source.
+  - Apache License 2.0 would be an equally valid alternative if you want an
+    explicit patent grant and GPLv3-compatibility; it is not required here
+    since you are not linking against any GPLv3 code.

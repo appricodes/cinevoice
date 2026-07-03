@@ -1,0 +1,1 @@
+"C:\Users\amiri\PycharmProjects\video_player\.venv\Scripts\python.exe" -m PyInstaller Cinevoice.spec --clean

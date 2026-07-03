@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cinevoice - Help & Documentation</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 900px; margin: 0 auto; padding: 20px; background-color: #f9f9f9; }
+        header { background-color: #2c3e50; color: #ffffff; padding: 30px 20px; border-radius: 8px; text-align: center; margin-bottom: 30px; }
+        h1 { margin: 0 0 10px 0; font-size: 2.5em; }
+        h2 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 5px; margin-top: 40px; }
+        h3 { color: #2980b9; margin-top: 30px; }
+        p { font-size: 1.1em; }
+        .highlight { background-color: #e8f4f8; border-left: 4px solid #3498db; padding: 15px; margin: 20px 0; border-radius: 0 4px 4px 0; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0 30px 0; background-color: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #2c3e50; color: white; font-size: 1.1em; }
+        tr:hover { background-color: #f5f5f5; }
+        kbd { background-color: #eee; border: 1px solid #b4b4b4; border-radius: 3px; box-shadow: 0 1px 1px rgba(0,0,0,.2), 0 2px 0 0 rgba(255,255,255,.7) inset; color: #333; display: inline-block; font-family: Consolas, "Liberation Mono", Courier, monospace; font-size: 0.9em; font-weight: 700; line-height: 1; padding: 2px 5px; white-space: nowrap; }
+        .footer { margin-top: 50px; text-align: center; font-size: 0.9em; color: #7f8c8d; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Cinevoice</h1>
+        <p style="font-size: 1.3em; margin: 0;">Your Independent AI Cinematic Companion</p>
+    </header>
+
+    <main>
+        <section aria-labelledby="how-to-use-heading">
+            <h2 id="how-to-use-heading">How to Use the App</h2>
+
+            <h3>1. Managing API Keys and AI Providers</h3>
+            <p>You can use Grok, Gemini, OpenAI, and Mistral. If you don't have keys right now, you can skip the startup dialog and just use the app as an accessible video player.</p>
+            <p>Press <kbd>Ctrl+M</kbd> at any time to open a popup menu where you can instantly switch between models, or add a key for a new provider.</p>
+
+            <h3>2. Basic Media Controls</h3>
+            <p>Press <kbd>Ctrl+O</kbd> to open a file browser and select your video. Use <kbd>Spacebar</kbd> to pause and play. Use the <kbd>Left/Right Arrow Keys</kbd> to seek by 10 seconds, or <kbd>Ctrl+Left/Right</kbd> for a bigger 60-second jump. Press <kbd>Home</kbd> to return to the beginning, a number key <kbd>0</kbd>-<kbd>9</kbd> to jump straight to that tenth of the video, and <kbd>Ctrl+Shift+Left/Right</kbd> to skip to the next or previous detected scene change. <kbd>Page Up/Page Down</kbd> (without Ctrl) move to the previous or next video file in the same folder.</p>
+
+            <h3>3. Commands Menu</h3>
+            <p>Forget a shortcut? Press <kbd>Ctrl+Down Arrow</kbd> to open the Commands Menu. You can navigate the list with your arrow keys and press <kbd>Enter</kbd> or <kbd>Escape</kbd> to run the command you selected!</p>
+
+            <h3>4. Describing What's Happening</h3>
+            <p>Press any of <kbd>F1</kbd>-<kbd>F6</kbd> or <kbd>F9</kbd>-<kbd>F12</kbd> to instantly ask for one of ten built-in description styles, from a brief one-line description to a full cinematic narration of several frames (see the Preset Prompts table below for exactly what each key does). <kbd>Ctrl+A</kbd> lets you type your own custom question instead, and <kbd>Ctrl+Shift+A</kbd> lets you ask by speaking into your microphone. <kbd>Ctrl+Up Arrow</kbd> repeats whichever prompt you last used.</p>
+            <p>You can save your own two favorite custom prompts: type one with <kbd>Ctrl+A</kbd>, then instead of pressing Enter, press <kbd>Shift+F7</kbd> or <kbd>Shift+F8</kbd> to save it to that slot. Afterwards, pressing plain <kbd>F7</kbd> or <kbd>F8</kbd> instantly reruns it.</p>
+            <p>For continuous narration, <kbd>Ctrl+D</kbd> narrates the video automatically in 30-second chunks as you watch, and <kbd>Ctrl+F</kbd> toggles an auto-describe mode that re-describes the changing scene every 5 seconds. <kbd>Ctrl+Shift+D</kbd> pre-generates narration for the entire video in the background so playback never has to pause and wait. <kbd>Shift+F12</kbd> generates one single story covering the whole video from start to finish (and <kbd>Ctrl+Shift+F12</kbd> regenerates it if you already have one cached).</p>
+            <p>Use <kbd>Ctrl+F1</kbd> through <kbd>Ctrl+F12</kbd> to choose the narration style (see the Narration Styles table below), and <kbd>Ctrl+Page Up/Page Down</kbd> to make descriptions longer or shorter.</p>
+
+            <h3>5. Offline AI Models (No Internet or API Key Needed)</h3>
+            <p>The player can also describe scenes completely offline using AI models that run on your own computer. Press <kbd>Ctrl+S</kbd> to open Settings; the "Offline AI Model" list is the first thing in that dialog. Choose a model and activate the button below it to download it; download progress is announced every one percent and shown in the window title, and you can cancel and resume it later. Models are between about 1.9 and 5.5 gigabytes; smaller models are faster, larger models describe better. The "Uncensored" variants are less restrictive about what they will describe.</p>
+            <p>Once a model is downloaded, selecting it again in that same list changes the button to "Delete Selected Offline Model," which permanently removes it from your disk after a confirmation dialog that you can review in full with <kbd>Tab</kbd>.</p>
+            <div class="highlight">
+                <p><strong>Important:</strong> Once downloaded, an offline model appears in the model menu (<kbd>Ctrl+M</kbd>). Offline models run on your processor (or an Intel graphics chip when available) and are <strong>much slower</strong> than online models — expect many seconds up to minutes for a single description. They are <strong>not suitable</strong> for continuous video narration; use them for single frame descriptions when you have no internet connection or want full privacy. Loading a model into memory the first time also takes a while, and the larger models need 8 gigabytes of free memory or more.</p>
+            </div>
+        </section>
+
+        <section aria-labelledby="shortcuts-heading">
+            <h2 id="shortcuts-heading">Keyboard Shortcuts</h2>
+
+            <h3>Playback and Navigation</h3>
+            <table>
+                <thead>
+                    <tr><th scope="col">Command / Action</th><th scope="col">Keyboard Shortcut</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Open a Video File</td><td><kbd>Ctrl</kbd> + <kbd>O</kbd></td></tr>
+                    <tr><td>Play / Pause</td><td><kbd>Spacebar</kbd> (or a media key)</td></tr>
+                    <tr><td>Seek Backward / Forward 10 Seconds</td><td><kbd>Left Arrow</kbd> / <kbd>Right Arrow</kbd></td></tr>
+                    <tr><td>Seek Backward / Forward 60 Seconds</td><td><kbd>Ctrl</kbd> + <kbd>Left/Right Arrow</kbd></td></tr>
+                    <tr><td>Jump to Previous / Next Scene Change</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Left/Right Arrow</kbd></td></tr>
+                    <tr><td>Jump to Beginning of Video</td><td><kbd>Home</kbd></td></tr>
+                    <tr><td>Jump to a Tenth of the Video (0% to 90%)</td><td><kbd>0</kbd> through <kbd>9</kbd></td></tr>
+                    <tr><td>Volume Up / Down</td><td><kbd>Up Arrow</kbd> / <kbd>Down Arrow</kbd></td></tr>
+                    <tr><td>Previous / Next Video File in Folder</td><td><kbd>Page Up</kbd> / <kbd>Page Down</kbd></td></tr>
+                </tbody>
+            </table>
+
+            <h3>Descriptions and Narration</h3>
+            <table>
+                <thead>
+                    <tr><th scope="col">Command / Action</th><th scope="col">Keyboard Shortcut</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Trigger a Preset Description Prompt</td><td><kbd>F1</kbd>-<kbd>F6</kbd>, <kbd>F9</kbd>-<kbd>F12</kbd> (see table below)</td></tr>
+                    <tr><td>Type a Custom Prompt / Question</td><td><kbd>Ctrl</kbd> + <kbd>A</kbd></td></tr>
+                    <tr><td>Ask a Question by Voice (Microphone)</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>A</kbd></td></tr>
+                    <tr><td>Repeat the Current Prompt</td><td><kbd>Ctrl</kbd> + <kbd>Up Arrow</kbd></td></tr>
+                    <tr><td>Assign Current Custom Prompt to Slot 1 / 2</td><td><kbd>Shift</kbd> + <kbd>F7</kbd> / <kbd>F8</kbd></td></tr>
+                    <tr><td>Run Your Saved Custom Prompt Slot 1 / 2</td><td><kbd>F7</kbd> / <kbd>F8</kbd></td></tr>
+                    <tr><td>Toggle Auto-Describe (every 5 seconds)</td><td><kbd>Ctrl</kbd> + <kbd>F</kbd></td></tr>
+                    <tr><td>Toggle Continuous 30-Second Narration</td><td><kbd>Ctrl</kbd> + <kbd>D</kbd></td></tr>
+                    <tr><td>Background Batch: Pre-Generate Whole Video</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>D</kbd></td></tr>
+                    <tr><td>Generate Full Video Cinematic Story</td><td><kbd>Shift</kbd> + <kbd>F12</kbd></td></tr>
+                    <tr><td>Regenerate Full Video Cinematic Story</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>F12</kbd></td></tr>
+                    <tr><td>Choose Narration Style</td><td><kbd>Ctrl</kbd> + <kbd>F1</kbd> through <kbd>F12</kbd> (see table below)</td></tr>
+                    <tr><td>Increase / Decrease Description Length</td><td><kbd>Ctrl</kbd> + <kbd>Page Up</kbd> / <kbd>Page Down</kbd></td></tr>
+                </tbody>
+            </table>
+
+            <h3>App and Settings</h3>
+            <table>
+                <thead>
+                    <tr><th scope="col">Command / Action</th><th scope="col">Keyboard Shortcut</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Open Interactive Commands Menu</td><td><kbd>Ctrl</kbd> + <kbd>Down Arrow</kbd></td></tr>
+                    <tr><td>Select AI Model Popup Menu</td><td><kbd>Ctrl</kbd> + <kbd>M</kbd></td></tr>
+                    <tr><td>Open Settings (Language, Voice, Speed, API Keys, Offline Models)</td><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td></tr>
+                    <tr><td>Review / Copy Last Spoken Output</td><td><kbd>Ctrl</kbd> + <kbd>R</kbd></td></tr>
+                    <tr><td>Announce Background Task Progress</td><td><kbd>Ctrl</kbd> + <kbd>I</kbd></td></tr>
+                    <tr><td>Open Help Manual in Browser</td><td><kbd>Ctrl</kbd> + <kbd>H</kbd></td></tr>
+                </tbody>
+            </table>
+
+            <h3>Preset Prompts (F1-F6, F9-F12)</h3>
+            <table>
+                <thead>
+                    <tr><th scope="col">Key</th><th scope="col">Preset</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><kbd>F1</kbd></td><td>Brief Description</td></tr>
+                    <tr><td><kbd>F2</kbd></td><td>Detailed Description</td></tr>
+                    <tr><td><kbd>F3</kbd></td><td>Identify Objects and People</td></tr>
+                    <tr><td><kbd>F4</kbd></td><td>Action Sequence (3 frames)</td></tr>
+                    <tr><td><kbd>F5</kbd></td><td>Scene Setting and Atmosphere</td></tr>
+                    <tr><td><kbd>F6</kbd></td><td>Read Visible Text / Subtitles</td></tr>
+                    <tr><td><kbd>F9</kbd></td><td>Cinematic Establishing Shot</td></tr>
+                    <tr><td><kbd>F10</kbd></td><td>Character Focus (3 frames)</td></tr>
+                    <tr><td><kbd>F11</kbd></td><td>Fluid Action Narration (5 frames)</td></tr>
+                    <tr><td><kbd>F12</kbd></td><td>Cinematic Micro-Story (10 frames)</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Narration Styles (Ctrl+F1-F12)</h3>
+            <table>
+                <thead>
+                    <tr><th scope="col">Key</th><th scope="col">Style</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><kbd>Ctrl+F1</kbd></td><td>Neutral Audio Description</td></tr>
+                    <tr><td><kbd>Ctrl+F2</kbd></td><td>Family Friendly</td></tr>
+                    <tr><td><kbd>Ctrl+F3</kbd></td><td>Childish & Playful</td></tr>
+                    <tr><td><kbd>Ctrl+F4</kbd></td><td>Technical & Objective</td></tr>
+                    <tr><td><kbd>Ctrl+F5</kbd></td><td>Explicit</td></tr>
+                    <tr><td><kbd>Ctrl+F6</kbd></td><td>Explicit and Naughty</td></tr>
+                    <tr><td><kbd>Ctrl+F7</kbd></td><td>Humorous & Comedic</td></tr>
+                    <tr><td><kbd>Ctrl+F8</kbd></td><td>Mysterious & Suspenseful</td></tr>
+                    <tr><td><kbd>Ctrl+F9</kbd></td><td>Poetic & Lyrical</td></tr>
+                    <tr><td><kbd>Ctrl+F10</kbd></td><td>Cinematic & Epic</td></tr>
+                    <tr><td><kbd>Ctrl+F11</kbd></td><td>Romantic & Emotional</td></tr>
+                    <tr><td><kbd>Ctrl+F12</kbd></td><td>Action & Fast-Paced</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section aria-labelledby="licensing-heading">
+            <h2 id="licensing-heading">Licensing</h2>
+            <p>This application's own license is in <code>LICENSE.txt</code>, and a full list of the third-party open source components it uses is in <code>THIRD-PARTY-LICENSES.txt</code>, both included in the application's installation folder.</p>
+        </section>
+    </main>
+</body>
+</html>
