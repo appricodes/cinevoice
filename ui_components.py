@@ -358,6 +358,54 @@ class DeleteConfirmDialog(ActivationDialog):
         announce_for_screen_reader(self.text, message)
 
 
+class ExistingDescriptionDialog(ActivationDialog):
+    """
+    Shown when batch-generating narration for the whole video finds block descriptions
+    already saved from an earlier run. The explanation lives in a read-only text area so
+    a screen reader user can Tab into it and review it in full. Cancel is the default and
+    initially focused button so an accidental Enter press can't wipe out existing work.
+    """
+    def __init__(self, block_count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Descriptions Already Exist")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+
+        message = (
+            f"This video already has {block_count} saved 30-second block description"
+            f"{'s' if block_count != 1 else ''}. "
+            "Regenerate deletes them and describes the whole video again from scratch. "
+            "Use Existing keeps them and turns on continuous 30-second narration, the same as Ctrl+D, "
+            "describing any remaining blocks as you reach them. "
+            "Cancel leaves everything as it is and starts nothing."
+        )
+        self.text = QTextEdit(self)
+        self.text.setReadOnly(True)
+        self.text.setPlainText(message)
+        self.text.setTabChangesFocus(True)
+        self.text.setAccessibleName("Existing description choice details")
+        layout.addWidget(self.text)
+
+        self.choice = "cancel"
+        self.button_box = QDialogButtonBox()
+        regenerate_button = self.button_box.addButton("Regenerate", QDialogButtonBox.ButtonRole.DestructiveRole)
+        use_existing_button = self.button_box.addButton("Use Existing", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = self.button_box.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        cancel_button.setDefault(True)
+        layout.addWidget(self.button_box)
+        self.setLayout(layout)
+
+        regenerate_button.clicked.connect(lambda: self._pick("regenerate"))
+        use_existing_button.clicked.connect(lambda: self._pick("use_existing"))
+        self.button_box.rejected.connect(self.reject)
+        cancel_button.setFocus()
+        announce_for_screen_reader(self.text, message)
+
+    def _pick(self, choice: str):
+        self.choice = choice
+        self.accept()
+
+
 class DownloadProgressDialog(ActivationDialog):
     """
     Modal dialog that downloads an offline model in a background thread. The

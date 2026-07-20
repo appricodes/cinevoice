@@ -25,7 +25,6 @@ from vision_manager import VisionManager
 class VideoPlayerWidget(QWidget):
     updateStatus = Signal(str)
     videoEnded = Signal()
-    sceneFoundReady = Signal(int)
     
     def __init__(self, media_path, api_keys, parent=None):
         super().__init__(parent)
@@ -113,9 +112,7 @@ class VideoPlayerWidget(QWidget):
         self.progress_slider.sliderClicked.connect(self.player.setPosition)
         self.updateStatus.connect(self.on_update_status)
         self.videoEnded.connect(self.handle_video_ended)
-        
-        self.sceneFoundReady.connect(self.handle_scene_found)
-        
+
         self.transcription_manager = TranscriptionManager(self)
         self.vision_manager = VisionManager(self)
         
@@ -166,17 +163,31 @@ class VideoPlayerWidget(QWidget):
         else:
             self.speak(f"Switched model to {model_dict['model_name']}.")
 
-    def get_data_file_path(self, suffix: str) -> str:
-        """Builds a path next to the video, e.g. myvideo.mp4 -> .data_files/myvideo<suffix>, for per-video caches."""
+    def get_data_dir(self) -> str:
+        """
+        Resolves this video's private data folder next to the file, without creating it --
+        callers that are about to write should create it themselves right before writing, so
+        merely opening a video never leaves a folder behind for videos with nothing cached.
+        Older versions used '.data_files'; if that exists but '.cinevoice' doesn't yet, it's
+        renamed in place so caches already on disk aren't orphaned.
+        """
         if not self.media_path: return ""
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(self.media_path)), ".data_files")
+        parent = os.path.dirname(os.path.abspath(self.media_path))
+        data_dir = os.path.join(parent, ".cinevoice")
         if not os.path.exists(data_dir):
-            try:
-                os.makedirs(data_dir, exist_ok=True)
-            except Exception:
-                return os.path.splitext(self.media_path)[0] + suffix
+            old_dir = os.path.join(parent, ".data_files")
+            if os.path.exists(old_dir):
+                try:
+                    os.rename(old_dir, data_dir)
+                except Exception:
+                    pass
+        return data_dir
+
+    def get_data_file_path(self, suffix: str) -> str:
+        """Builds a path inside this video's data folder, e.g. myvideo.mp4 -> .cinevoice/myvideo<suffix>, for per-video caches."""
+        if not self.media_path: return ""
         base_name = os.path.splitext(os.path.basename(self.media_path))[0]
-        return os.path.join(data_dir, base_name + suffix)
+        return os.path.join(self.get_data_dir(), base_name + suffix)
     
     def load_video(self, new_path: str):
         """Stops the current video, clears its AI conversation/narration state, then loads and plays new_path."""
@@ -197,8 +208,7 @@ class VideoPlayerWidget(QWidget):
         self.player.setPosition(0)
         
         self.vision_manager.init_lookahead_data()
-        self.vision_manager.analyze_video_scenes()
-        
+
         self.player.play()
         self.video_widget.setFocus()
     
@@ -300,17 +310,6 @@ class VideoPlayerWidget(QWidget):
         self.player.setPosition(0)
         self.video_widget.setFocus()
         
-    @Slot(int)
-    def handle_scene_found(self, found_ms: int):
-        self.player.setPosition(found_ms)
-        try:
-            import winsound
-            winsound.Beep(800, 50)
-        except Exception:
-            pass
-        pos_str = self.format_time(found_ms)
-        self.speak(f"Scene changed at {pos_str}")
-    
     def speak(self, text: str):
         """
         Announces text to the user: via the active screen reader (NVDA/JAWS/Narrator) if one
@@ -369,10 +368,6 @@ class VideoPlayerWidget(QWidget):
                 self.transcription_manager.start_voice_query()
             elif key == Qt.Key.Key_F12:
                 self.vision_manager.generate_full_video_story(force_regenerate=True)
-            elif key == Qt.Key.Key_Left:
-                self.vision_manager.seek_to_scene(direction_forward=False)
-            elif key == Qt.Key.Key_Right:
-                self.vision_manager.seek_to_scene(direction_forward=True)
             elif key == Qt.Key.Key_D:
                 self.vision_manager.start_batch_lookahead()
             else:

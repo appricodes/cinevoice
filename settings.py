@@ -76,18 +76,18 @@ PROMPTS = [
         "title": "Character Focus",
         "prompt": "Focus entirely on the people or creatures. Describe their expressions, body language, and immediate actions fluidly in the present tense.", 
         "frames_count": 3, 
-        "frames_interval": 0.5
+        "frames_interval": 1.0
     },
     {
         "title": "Fluid Action Narration",
-        "prompt": "Narrate the unfolding action sequence as a seamless, continuous real-time story. Infer the natural bridging movements between these moments.", 
-        "frames_count": 5, 
+        "prompt": "Narrate what happens across this moment as a short, chronological story, in the order it unfolds. Add a touch of sensory detail -- setting, mood, expression -- so the listener can picture it, but skip trivial motions like a glance or a small gesture shift.",
+        "frames_count": 10,
         "frames_interval": 0.5
     },
     {
         "title": "Cinematic Micro-Story",
-        "prompt": "Translate these sequential visual moments into a vivid, continuous, real-time story from beginning to end. Focus on exact physical actions and spatial movements.", 
-        "frames_count": 10, 
-        "frames_interval": 1.0
+        "prompt": "Tell what happens across these moments as a vivid, chronological micro-story, from beginning to end. Include enough sensory and atmospheric detail -- surroundings, mood, who's involved -- to help the listener picture the scene, without dwelling on minor or valueless movements.",
+        "frames_count": 20,
+        "frames_interval": 6.0
     }
 ]

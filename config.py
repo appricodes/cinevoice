@@ -198,9 +198,10 @@ SETTINGS_FILE = "settings.json"
 # API keys and forcing them to re-enter every provider's key.
 KEYRING_SERVICE_NAME = "AIVideoNarrator"
 
-SCENE_KMEAN_IMAGE_SIZE = (64, 64)
-SCENE_FRAME_INTERVAL = 3.0
-SCENE_KMEAN_CLUSTERS = 3
+# Containers that use the ISO base media (MP4/QuickTime) box format: descriptions can be
+# embedded directly in the file itself (see mp4_metadata.py). Other formats (.avi, .mkv,
+# .wmv) use a different container structure entirely, so they keep using sidecar files.
+MP4_METADATA_EXTS = {'.mp4', '.m4v', '.mov'}
 
 GOOGLE_SPEECH_LANGUAGES = {
     "Afrikaans": "af-ZA", "Arabic": "ar-SA", "Bulgarian": "bg-BG",

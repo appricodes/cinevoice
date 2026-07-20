@@ -1,8 +1,7 @@
 """
 Captures video frames and sends them to the AI model for description, plus the
-supporting features built on top of that: scene-change detection (k-means color
-clustering), continuous 30-second narration, batch pre-generation, and full-video
-story summaries.
+supporting features built on top of that: continuous 30-second narration, batch
+pre-generation, and full-video story summaries.
 """
 import os
 import json
@@ -11,9 +10,10 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import QDialog
 from PySide6.QtMultimedia import QMediaPlayer
 
-from config import MAX_IMAGE_DIM, SCENE_KMEAN_IMAGE_SIZE, SCENE_FRAME_INTERVAL, SCENE_KMEAN_CLUSTERS
+from config import MAX_IMAGE_DIM, MP4_METADATA_EXTS
 from utils import clean_string, encode_and_resize_frame
-from ui_components import CustomPromptDialog
+from ui_components import CustomPromptDialog, ExistingDescriptionDialog
+import mp4_metadata
 
 class VisionManager(QObject):
     """Owns all frame-capture and AI-description logic; one instance per open video."""
@@ -27,11 +27,10 @@ class VisionManager(QObject):
         self.mw = main_window
         self.chat_history = []
         self._history_lock = threading.Lock()
+        self._embedded_meta_lock = threading.Lock()
         self._inflight = False
         self._batch_inflight = False
-        
-        self.scene_timestamps = []
-        
+
         self.lookahead_mode = False
         self.lookahead_data = {}
         self.lookahead_json_path = ""
@@ -52,6 +51,53 @@ class VisionManager(QObject):
     def _is_local_model(self) -> bool:
         return self.mw.current_model_dict.get("provider_id") == "local"
 
+    def _uses_embedded_metadata(self) -> bool:
+        """Whether the current video's container can hold our descriptions directly."""
+        if not self.mw.media_path: return False
+        return os.path.splitext(self.mw.media_path)[1].lower() in MP4_METADATA_EXTS
+
+    def _update_embedded_metadata(self, **updates) -> bool:
+        """Read-modify-write the embedded metadata box so a block-description save doesn't
+        clobber the full story (and vice versa) -- both live in the same box."""
+        with self._embedded_meta_lock:
+            data = mp4_metadata.read_metadata(self.mw.media_path)
+            data.update(updates)
+            return mp4_metadata.write_metadata(self.mw.media_path, data)
+
+    def _migrate_legacy_sidecars_to_embedded(self):
+        """
+        One-time migration: this video may still have old sidecar description files
+        sitting in its .cinevoice folder (from before descriptions moved into the MP4
+        itself, or before that folder was still named .data_files -- get_data_dir already
+        renames that in place). If so, fold them into the video's embedded metadata and
+        delete the sidecar files, but only after the embed actually succeeds.
+        """
+        if not self._uses_embedded_metadata(): return
+        json_path = self.mw.get_data_file_path(".json")
+        story_path = self.mw.get_data_file_path(".story.txt")
+        if not os.path.exists(json_path) and not os.path.exists(story_path):
+            return
+
+        updates = {}
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    updates["blocks"] = json.load(f)
+            except Exception:
+                pass
+        if os.path.exists(story_path):
+            try:
+                with open(story_path, 'r', encoding='utf-8') as f:
+                    updates["story"] = f.read()
+            except Exception:
+                pass
+        if not updates or not self._update_embedded_metadata(**updates):
+            return
+        for path in (json_path, story_path):
+            try:
+                if os.path.exists(path): os.remove(path)
+            except Exception:
+                pass
 
     def assign_custom_prompt(self, slot):
         was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
@@ -204,10 +250,17 @@ class VisionManager(QObject):
             self.chat_history.append({"role": "assistant", "content": desc})
     
     def init_lookahead_data(self):
-        """Loads any 30-second block descriptions already cached on disk for this video."""
+        """Loads any 30-second block descriptions already saved for this video: embedded in
+        the file itself for MP4/MOV, or a legacy sidecar .json for other containers."""
         if not self.mw.media_path: return
-        self.lookahead_json_path = self.mw.get_data_file_path(".json")
         self.lookahead_data.clear()
+        if self._uses_embedded_metadata():
+            self._migrate_legacy_sidecars_to_embedded()
+            self.lookahead_json_path = ""
+            for item in mp4_metadata.read_metadata(self.mw.media_path).get("blocks", []):
+                self.lookahead_data[item.get("time", 0) // 30] = item.get("description", "")
+            return
+        self.lookahead_json_path = self.mw.get_data_file_path(".json")
         if os.path.exists(self.lookahead_json_path):
             try:
                 with open(self.lookahead_json_path, 'r', encoding='utf-8') as f:
@@ -215,32 +268,42 @@ class VisionManager(QObject):
                         self.lookahead_data[item.get("time", 0) // 30] = item.get("description", "")
             except Exception:
                 pass
-    
+
     def save_lookahead_data(self):
-        """Writes the 30-second block descriptions to disk so they persist across sessions."""
-        if not self.lookahead_json_path: return
+        """Persists the 30-second block descriptions so they survive across sessions:
+        embedded in the video file itself for MP4/MOV, or a legacy sidecar .json otherwise."""
         data = [{"time": idx * 30, "description": desc} for idx, desc in sorted(self.lookahead_data.items())]
+        if self._uses_embedded_metadata():
+            self._update_embedded_metadata(blocks=data)
+            return
+        if not self.lookahead_json_path: return
         try:
+            os.makedirs(os.path.dirname(self.lookahead_json_path), exist_ok=True)
             with open(self.lookahead_json_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
     
     def toggle_lookahead_mode(self):
-        self.lookahead_mode = not self.lookahead_mode
         if self.lookahead_mode:
-            self.mw.speak("Continuous 30-second narration enabled.")
-            self.is_auto_describing = False
-            self.auto_describe_timer.stop()
-            self.init_lookahead_data()
-            self.current_playing_block = -1
-            self.check_and_fetch_lookahead()
-        else:
+            self.lookahead_mode = False
             self.mw.speak("Continuous narration disabled.")
             self.waiting_for_block = -1
             self.fetching_block = -1
             if self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PausedState:
                 self.mw.player.play()
+        else:
+            self.enable_lookahead_mode()
+
+    def enable_lookahead_mode(self):
+        """Turns on continuous 30-second narration; safe to call even if already enabled."""
+        self.lookahead_mode = True
+        self.mw.speak("Continuous 30-second narration enabled.")
+        self.is_auto_describing = False
+        self.auto_describe_timer.stop()
+        self.init_lookahead_data()
+        self.current_playing_block = -1
+        self.check_and_fetch_lookahead()
     
     def check_and_fetch_lookahead(self):
         """Fetches the current or next 30-second block's description if it isn't cached yet, staying one block ahead of playback."""
@@ -282,26 +345,28 @@ class VisionManager(QObject):
 
         if self._is_local_model():
             system_prompt = (
-                f"Narrate these frames as one story. "
+                f"Narrate these frames as the next part of an ongoing story, in chronological order. "
+                f"Skip small movements like glances or gestures unless they matter to the story. "
                 f"Under {self.mw.current_max_words} words. Do not say 'image' or 'frame'."
             )
-            user_text = "Narrate what happens."
+            user_text = "Continue the story with what happens next."
             if prev_desc:
-                user_text += f" Previous: {prev_desc}"
+                user_text += f" So far: {prev_desc}"
         else:
             system_prompt = (
                 f"You are a professional cinematic audio describer. Respond in {self.mw.current_language}. "
                 f"Limit to {self.mw.current_max_words} words. "
-                f"Translate these sequential visual moments into a seamless, continuous real-time story. "
+                f"Tell this block as the next chronological beat in one ongoing story. "
                 f"CRITICAL INSTRUCTIONS: "
                 f"1. Never use words like 'image', 'frame', or 'shows'. Treat the input as a living world. "
                 f"2. Write in the immediate present tense and active voice. "
-                f"3. Weave the actions fluidly. "
-                f"4. Focus on exact physical actions, expressions, and spatial movements."
+                f"3. Narrate events in the order they happen, with just enough scene detail -- setting, mood, who's involved -- to help the listener picture it. "
+                f"4. Skip valueless micro-movements (a glance, a small gesture, a shift in posture) unless they actually matter to what's happening. "
+                f"5. Continue directly from where the previous block left off; never repeat or re-describe what already happened."
             )
-            user_text = "Narrate the unfolding events fluidly."
+            user_text = "Narrate what happens next."
             if prev_desc:
-                user_text += f"\n\nCONTEXT FROM PRECEDING SCENE:\n\"\"\"\n{prev_desc}\n\"\"\"\nContinue seamlessly without summarizing."
+                user_text += f"\n\nCONTEXT FROM PRECEDING SCENE:\n\"\"\"\n{prev_desc}\n\"\"\"\nContinue seamlessly from there without repeating or summarizing it."
         
         try:
             self.mw.updateStatus.emit(f"Sending block {block_idx} to API...")
@@ -356,8 +421,22 @@ class VisionManager(QObject):
             return
 
         max_blocks = (dur // 30000) + 1
-        self.mw.speak(f"Starting batch processing of {max_blocks} blocks.")
         self.init_lookahead_data()
+        if self.lookahead_data:
+            was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            if was_playing: self.mw.player.pause()
+            dialog = ExistingDescriptionDialog(len(self.lookahead_data), self.mw)
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            if was_playing: self.mw.player.play()
+            if not accepted:
+                return
+            if dialog.choice == "use_existing":
+                self.enable_lookahead_mode()
+                return
+            self.lookahead_data.clear()
+            self.save_lookahead_data()
+
+        self.mw.speak(f"Starting batch processing of {max_blocks} blocks.")
         self._batch_inflight = True
         self.is_auto_describing = False
         self.auto_describe_timer.stop()
@@ -387,154 +466,37 @@ class VisionManager(QObject):
         self._batch_inflight = False
         self.mw.speak("Batch processing is complete.")
     
-    def _get_frame_clusters(self, frame, k: int):
-        """Returns a frame's k dominant colors and each one's share of the pixels, for scene-cut comparison."""
-        import cv2
-        import numpy as np
-        small = cv2.resize(frame, SCENE_KMEAN_IMAGE_SIZE)
-        Z = small.reshape((-1, 3))
-        Z = np.float32(Z)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        ret, labels, centers = cv2.kmeans(Z, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
-        weights = np.zeros(len(centers), dtype=np.float32)
-        total_pixels = Z.shape[0]
-        for i in range(len(centers)):
-            weights[i] = np.sum(labels == i) / total_pixels
-        return centers, weights
-
-    def _compare_clusters(self, centers1, weights1, centers2, weights2) -> float:
-        """Distance between two frames' color palettes: higher means a bigger visual change (likely a cut)."""
-        import numpy as np
-        total_diff = 0.0
-        for i, c1 in enumerate(centers1):
-            dists = np.linalg.norm(centers2 - c1, axis=1)
-            total_diff += np.min(dists) * weights1[i]
-        for j, c2 in enumerate(centers2):
-            dists = np.linalg.norm(centers1 - c2, axis=1)
-            total_diff += np.min(dists) * weights2[j]
-        return float(total_diff)
-        
-    def analyze_video_scenes(self):
-        """Loads cached scene-change timestamps for this video, or starts detecting them in the background."""
-        if not self.mw.media_path: return
-        
-        self.scene_timestamps = []
-        cache_path = self.mw.get_data_file_path("_scenes_time.json")
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    self.scene_timestamps = json.load(f)
-                return
-            except Exception:
-                pass
-                
-        threading.Thread(target=self._scene_analysis_worker, args=(cache_path,), daemon=True).start()
-
-    def _scene_analysis_worker(self, cache_path: str):
-        """
-        Samples a frame every SCENE_FRAME_INTERVAL seconds and measures the color-palette
-        change since the previous sample. A timestamp counts as a scene cut only if its
-        change is more than 2 standard deviations above the video's average change, which
-        filters out ordinary motion and keeps only genuine cuts.
-        """
-        import cv2
-        cap = cv2.VideoCapture(self.mw.media_path)
-        if not cap.isOpened(): return
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0: fps = 30
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration_sec = frame_count / fps
-
-        diffs_data = []
-        
-        ret, frame = cap.read()
-        if not ret: 
-            cap.release()
-            return
-            
-        prev_centers, prev_weights = self._get_frame_clusters(frame, SCENE_KMEAN_CLUSTERS)
-        current_sec = SCENE_FRAME_INTERVAL
-
-        while current_sec <= duration_sec:
-            cap.set(cv2.CAP_PROP_POS_MSEC, current_sec * 1000)
-            ret, frame = cap.read()
-            if not ret: break
-            
-            centers, weights = self._get_frame_clusters(frame, SCENE_KMEAN_CLUSTERS)
-            diff = self._compare_clusters(prev_centers, prev_weights, centers, weights)
-            
-            diffs_data.append((int(current_sec * 1000), diff))
-            prev_centers, prev_weights = centers, weights
-            current_sec += SCENE_FRAME_INTERVAL
-
-        cap.release()
-
-        if not diffs_data: return
-
-        diff_values = [d[1] for d in diffs_data]
-        mean_diff = sum(diff_values) / len(diff_values)
-        variance = sum([((x - mean_diff) ** 2) for x in diff_values]) / len(diff_values)
-        std_dev = variance ** 0.5
-        threshold = mean_diff + (2 * std_dev)
-
-        self.scene_timestamps = [d[0] for d in diffs_data if d[1] > threshold]
-        
-        try:
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump(self.scene_timestamps, f)
-        except Exception:
-            pass
-        
-    def seek_to_scene(self, direction_forward: bool):
-        """Jumps playback to the next or previous timestamp in scene_timestamps."""
-        if not self.mw.media_path: return
-        
-        if not self.scene_timestamps:
-            self.mw.speak("Scene analysis is still calculating in the background.")
-            return
-            
-        cur_ms = self.mw.player.position()
-        buffer_ms = SCENE_FRAME_INTERVAL * 1000 
-        target_ms = -1
-        
-        if direction_forward:
-            for t in self.scene_timestamps:
-                if t > cur_ms + buffer_ms:
-                    target_ms = t
-                    break
-        else:
-            for t in reversed(self.scene_timestamps):
-                if t < cur_ms - buffer_ms:
-                    target_ms = t
-                    break
-                    
-        if target_ms != -1:
-            self.mw.sceneFoundReady.emit(target_ms)
-        else:
-            self.mw.speak("No further scenes available.")
-
     @Slot(str)
     def handle_full_story_ready(self, text: str):
         self.mw.updateStatus.emit("Full video story ready.")
         self.mw.speak(text)
 
     def generate_full_video_story(self, force_regenerate: bool = False):
-        """Narrates the whole video in one AI call using up to 100 evenly-spaced frames; result is cached to disk."""
+        """
+        Narrates the whole video in one AI call using up to 100 evenly-spaced frames.
+        The result is cached: embedded in the video file itself for MP4/MOV, or a legacy
+        sidecar .story.txt for other containers (story_path stays None for the embedded
+        case -- _full_story_worker uses that to decide where to save the result).
+        """
         if not self.mw.media_path:
             self.mw.speak("Please open a video file first.")
             return
 
-        story_path = self.mw.get_data_file_path(".story.txt")
-        if not force_regenerate and os.path.exists(story_path):
-            self.mw.speak("Reading cached story.")
-            try:
-                with open(story_path, 'r', encoding='utf-8') as f:
-                    cached_text = f.read()
+        story_path = None if self._uses_embedded_metadata() else self.mw.get_data_file_path(".story.txt")
+        if not force_regenerate:
+            cached_text = ""
+            if story_path is None:
+                cached_text = mp4_metadata.read_metadata(self.mw.media_path).get("story", "")
+            elif os.path.exists(story_path):
+                try:
+                    with open(story_path, 'r', encoding='utf-8') as f:
+                        cached_text = f.read()
+                except Exception:
+                    pass
+            if cached_text:
+                self.mw.speak("Reading cached story.")
                 self.mw.speak(cached_text)
                 return
-            except Exception:
-                pass
 
         if self._inflight:
             self.mw.speak("A vision process is already running.")
@@ -544,7 +506,7 @@ class VisionManager(QObject):
         self._inflight = True
         threading.Thread(target=self._full_story_worker, args=(story_path,), daemon=True).start()
 
-    def _full_story_worker(self, story_path: str):
+    def _full_story_worker(self, story_path: str | None):
         import cv2 
         try:
             cap = cv2.VideoCapture(self.mw.media_path)
@@ -612,11 +574,15 @@ class VisionManager(QObject):
             if response and isinstance(response, dict):
                 if "choices" in response:
                     result_text = clean_string(response["choices"][0]["message"]["content"].strip())
-                    try:
-                        with open(story_path, 'w', encoding='utf-8') as f:
-                            f.write(result_text)
-                    except Exception:
-                        pass
+                    if story_path is None:
+                        self._update_embedded_metadata(story=result_text)
+                    else:
+                        try:
+                            os.makedirs(os.path.dirname(story_path), exist_ok=True)
+                            with open(story_path, 'w', encoding='utf-8') as f:
+                                f.write(result_text)
+                        except Exception:
+                            pass
                     self.fullStoryReady.emit(result_text)
                 elif "error" in response:
                     self.fullStoryReady.emit(f"Error: {response['error']}")

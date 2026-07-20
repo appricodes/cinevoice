@@ -9,7 +9,6 @@ An accessible, keyboard-driven video player for blind and low-vision users, buil
 - **Continuous narration** — describes the video in real time as it plays, or pre-generates a full 30-second-block narration in the background.
 - **Full-video cinematic story** — one AI-generated narrative summary of the entire video.
 - **12 narration styles** — from neutral audio description to cinematic, poetic, humorous, or explicit.
-- **Scene-change detection** — jump straight to the next or previous cut.
 - **Online or fully offline** — use Grok, Gemini, OpenAI, or Mistral with your own API key, or download a vision-language model (OpenVINO, 1.9–5.5 GB) and run everything locally on your own CPU/GPU with no internet connection or API key.
 - **Screen-reader native** — built to work with NVDA, JAWS, and Windows Narrator.
 
