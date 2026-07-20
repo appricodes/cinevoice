@@ -73,6 +73,14 @@ MODELS = [
        "parameters": {
           "reasoning_effort": "none"
        }
+    },
+    {
+       "model_name": "test",
+       "provider_name": "LM Studio",
+       "model_id": "qwen3-vl-32b-instruct-uncensored-heretic-i1",
+       "provider_id": "LM_Studio",
+       "endpoint": "http://127.0.0.1:21234/v1/chat/completions",
+       "parameters": {}
     }
 ]
 

@@ -48,7 +48,11 @@ class VisionManager(QObject):
         self.lookaheadBlockReady.connect(self.handle_lookahead_ready)
         self.batchCompleteSignal.connect(self.on_batch_complete)
         self.fullStoryReady.connect(self.handle_full_story_ready)
-    
+
+    def _is_local_model(self) -> bool:
+        return self.mw.current_model_dict.get("provider_id") == "local"
+
+
     def assign_custom_prompt(self, slot):
         was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         if was_playing: self.mw.player.pause()
@@ -133,15 +137,25 @@ class VisionManager(QObject):
                 cap.release()
             
             final_user_prompt = prompt_text
-            
-            system_prompt_string = (
-                f"You are a professional cinematic audio describer. Respond in {self.mw.current_language} using a '{self.mw.current_mode}' style. "
-                f"Limit to {max_words} words. "
-                f"CRITICAL INSTRUCTIONS: "
-                f"1. Never use words like 'image', 'frame', 'picture', or 'shows'. Treat the visual input as a living, unfolding world. "
-                f"2. Write in the immediate present tense and active voice. "
-                f"3. Strictly describe ONLY what is actually, physically present in the scene. Do not hallucinate or assume unseen events."
-            )
+
+            # Local models are small and quantized: a short, single-clause instruction is
+            # followed far more reliably than the long, multi-rule prompt used for the big
+            # online models (language is handled separately, right before generation, by
+            # local_vlm._enforce_language, so it's omitted here).
+            if self._is_local_model():
+                system_prompt_string = (
+                    f"Describe the scene. Style: {self.mw.current_mode}. "
+                    f"Under {max_words} words. Do not say 'image' or 'frame'."
+                )
+            else:
+                system_prompt_string = (
+                    f"You are a professional cinematic audio describer. Respond in {self.mw.current_language} using a '{self.mw.current_mode}' style. "
+                    f"Limit to {max_words} words. "
+                    f"CRITICAL INSTRUCTIONS: "
+                    f"1. Never use words like 'image', 'frame', 'picture', or 'shows'. Treat the visual input as a living, unfolding world. "
+                    f"2. Write in the immediate present tense and active voice. "
+                    f"3. Strictly describe ONLY what is actually, physically present in the scene. Do not hallucinate or assume unseen events."
+                )
             
             with self._history_lock:
                 self.chat_history.append({"role": "user", "content": final_user_prompt})
@@ -265,20 +279,29 @@ class VisionManager(QObject):
             cap.release()
         
         if not frames_b64: return "Error: No frames extracted."
-        
-        system_prompt = (
-            f"You are a professional cinematic audio describer. Respond in {self.mw.current_language}. "
-            f"Limit to {self.mw.current_max_words} words. "
-            f"Translate these sequential visual moments into a seamless, continuous real-time story. "
-            f"CRITICAL INSTRUCTIONS: "
-            f"1. Never use words like 'image', 'frame', or 'shows'. Treat the input as a living world. "
-            f"2. Write in the immediate present tense and active voice. "
-            f"3. Weave the actions fluidly. "
-            f"4. Focus on exact physical actions, expressions, and spatial movements."
-        )
-        user_text = "Narrate the unfolding events fluidly."
-        if prev_desc:
-            user_text += f"\n\nCONTEXT FROM PRECEDING SCENE:\n\"\"\"\n{prev_desc}\n\"\"\"\nContinue seamlessly without summarizing."
+
+        if self._is_local_model():
+            system_prompt = (
+                f"Narrate these frames as one story. "
+                f"Under {self.mw.current_max_words} words. Do not say 'image' or 'frame'."
+            )
+            user_text = "Narrate what happens."
+            if prev_desc:
+                user_text += f" Previous: {prev_desc}"
+        else:
+            system_prompt = (
+                f"You are a professional cinematic audio describer. Respond in {self.mw.current_language}. "
+                f"Limit to {self.mw.current_max_words} words. "
+                f"Translate these sequential visual moments into a seamless, continuous real-time story. "
+                f"CRITICAL INSTRUCTIONS: "
+                f"1. Never use words like 'image', 'frame', or 'shows'. Treat the input as a living world. "
+                f"2. Write in the immediate present tense and active voice. "
+                f"3. Weave the actions fluidly. "
+                f"4. Focus on exact physical actions, expressions, and spatial movements."
+            )
+            user_text = "Narrate the unfolding events fluidly."
+            if prev_desc:
+                user_text += f"\n\nCONTEXT FROM PRECEDING SCENE:\n\"\"\"\n{prev_desc}\n\"\"\"\nContinue seamlessly without summarizing."
         
         try:
             self.mw.updateStatus.emit(f"Sending block {block_idx} to API...")
@@ -558,18 +581,24 @@ class VisionManager(QObject):
                 self.mw.updateStatus.emit("Error: No frames extracted.")
                 return
 
-            system_prompt = (
-                f"You are a professional cinematic audio describer. Respond in {self.mw.current_language}. "
-                f"Use a '{self.mw.current_mode}' writing style. Limit the story to exactly {self.mw.current_max_words} words. "
-                f"I am providing you with {len(frames_b64)} visual frames extracted every {interval_ms/1000:.1f} seconds, spanning the entire video. "
-                f"Translate these sequential visual moments into a seamless, continuous, real-time story. "
-                f"CRITICAL INSTRUCTIONS: "
-                f"1. Never use words like 'image', 'frame', or 'shows'. Treat the input as a living world. "
-                f"2. Write in the immediate present tense and active voice. "
-                f"3. Weave the actions fluidly, naturally inferring the bridging movements between the gaps."
-            )
-
-            user_text = "Watch the entire sequence and narrate the unfolding events fluidly from beginning to end."
+            if self._is_local_model():
+                system_prompt = (
+                    f"Narrate these {len(frames_b64)} frames as one story. Style: {self.mw.current_mode}. "
+                    f"Under {self.mw.current_max_words} words. Do not say 'image' or 'frame'."
+                )
+                user_text = "Narrate the video from start to end."
+            else:
+                system_prompt = (
+                    f"You are a professional cinematic audio describer. Respond in {self.mw.current_language}. "
+                    f"Use a '{self.mw.current_mode}' writing style. Limit the story to exactly {self.mw.current_max_words} words. "
+                    f"I am providing you with {len(frames_b64)} visual frames extracted every {interval_ms/1000:.1f} seconds, spanning the entire video. "
+                    f"Translate these sequential visual moments into a seamless, continuous, real-time story. "
+                    f"CRITICAL INSTRUCTIONS: "
+                    f"1. Never use words like 'image', 'frame', or 'shows'. Treat the input as a living world. "
+                    f"2. Write in the immediate present tense and active voice. "
+                    f"3. Weave the actions fluidly, naturally inferring the bridging movements between the gaps."
+                )
+                user_text = "Watch the entire sequence and narrate the unfolding events fluidly from beginning to end."
             self.mw.updateStatus.emit("Sending frames to API...")
             response = self.mw.api_client.send(
                 model_dict=self.mw.current_model_dict,
