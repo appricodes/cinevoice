@@ -86,8 +86,12 @@ def read_metadata(path: str) -> dict:
 def write_metadata(path: str, data: dict) -> bool:
     """
     Replaces Cinevoice's embedded uuid box (or appends one if absent) with data as JSON.
-    Safe by construction: existing boxes are never rewritten in place, only truncated back
-    to and re-appended at the same tail position, so nothing before them ever shifts.
+    Safe by construction: existing boxes are never rewritten in place, only re-appended at
+    the same tail position, so nothing before them ever shifts.
+
+    The new box is written before the file is truncated, never after. Truncating first would
+    mean a crash in between could take anything that followed our box with it -- the user's
+    own video data -- and this writes into files the user cannot replace.
     """
     if not path or not os.path.exists(path):
         return False
@@ -106,13 +110,16 @@ def write_metadata(path: str, data: dict) -> bool:
                 box_start, box_end, _ = found
                 f.seek(box_end)
                 trailing = f.read()
-                f.truncate(box_start)
                 f.seek(box_start)
             else:
                 f.seek(0, os.SEEK_END)
             f.write(new_box)
             if trailing:
                 f.write(trailing)
+            # Only now drop whatever the old, longer box left behind past the new end.
+            f.truncate(f.tell())
+            f.flush()
+            os.fsync(f.fileno())
         return True
     except (_UnsupportedLayout, OSError):
         return False

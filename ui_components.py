@@ -1,6 +1,6 @@
 """Dialog windows and small custom widgets shared across the app."""
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QPushButton, QDialogButtonBox, QLineEdit,
     QTextEdit, QSlider, QMessageBox, QFormLayout, QListWidget
 )
@@ -35,11 +35,21 @@ class ClickableSlider(QSlider):
             event.accept()
         super().mousePressEvent(event)
 
-class CustomPromptDialog(QDialog):
+class CustomPromptPanel(QWidget):
     """
     Lets the user type a free-form question and pick how many frames to send with it.
-    The class-level last_* fields remember the previous values so the next time this
-    dialog opens (Ctrl+A) it's pre-filled with what was asked before.
+    The class-level last_* fields remember the previous values in memory only, so the next
+    time this panel opens (Ctrl+A) within the same run it's pre-filled with what was asked
+    before -- nothing here is written to disk, so none of it survives closing the app.
+
+    This is a plain child widget, embedded in the main window and hidden until needed
+    (open_for_input), rather than a separate QDialog. A modal dialog opening and then closing
+    changes the OS foreground window twice, and screen readers announce the newly-foregrounded
+    window's full title on each change -- for the main window that title includes the open
+    file's name, so a screen reader user had to sit through it, however long, before hearing
+    anything else every time this closed. Showing/hiding a child widget never changes the
+    foreground window, so that re-announcement doesn't happen; only what the app explicitly
+    speaks (via MainWindow.speak) is heard.
     """
     last_prompt = ""
     last_frames_index = 0
@@ -48,76 +58,103 @@ class CustomPromptDialog(QDialog):
     last_frames_val = 1
     last_interval_val = 0.5
     last_words_val = 100
-    
+
+    # prompt_text, frames_count, frames_interval, max_words
+    accepted = Signal(str, int, float, int)
+    cancelled = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Custom Prompt")
-        self.setGeometry(300, 300, 420, 260)
-        
+
         self.prompt_label = QLabel("Enter your custom prompt:")
         self.prompt_edit = QLineEdit(self)
-        self.prompt_edit.setText(CustomPromptDialog.last_prompt)
-        
+
         self.frames_label = QLabel("Number of frames:")
         self.frames_combo = QComboBox(self)
         self.frames_combo.addItems(["1", "2", "3", "5", "10", "20", "50", "100"])
-        self.frames_combo.setCurrentIndex(CustomPromptDialog.last_frames_index)
-        
+
         self.interval_label = QLabel("Frame intervals (sec):")
         self.interval_combo = QComboBox(self)
         self.interval_combo.addItems(["0.25", "0.5", "1", "2", "5", "10"])
-        self.interval_combo.setCurrentIndex(CustomPromptDialog.last_interval_index)
-        
+
         self.words_label = QLabel("Max reply length (words):")
         self.words_combo = QComboBox(self)
         self.words_combo.addItems(["10", "50", "100", "250", "500", "1000", "2000", "4000"])
-        self.words_combo.setCurrentIndex(CustomPromptDialog.last_words_index)
-        
+
         self.ask_button = QPushButton("Ask", self)
-        
+        # QPushButton.autoDefault only defaults to True when its top-level parent is a
+        # QDialog; ours is a plain QWidget, so without this Enter would do nothing while the
+        # button has focus (Space would still work, since that's unconditional).
+        self.ask_button.setAutoDefault(True)
+
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(self.prompt_label)
         main_layout.addWidget(self.prompt_edit)
-        
+
         frames_layout = QHBoxLayout()
         frames_layout.addWidget(self.frames_label)
         frames_layout.addWidget(self.frames_combo, 1)
         main_layout.addLayout(frames_layout)
-        
+
         interval_layout = QHBoxLayout()
         interval_layout.addWidget(self.interval_label)
         interval_layout.addWidget(self.interval_combo, 1)
         main_layout.addLayout(interval_layout)
-        
+
         words_layout = QHBoxLayout()
         words_layout.addWidget(self.words_label)
         words_layout.addWidget(self.words_combo, 1)
         main_layout.addLayout(words_layout)
-        
-        main_layout.addStretch()
+
         main_layout.addWidget(self.ask_button)
         self.setLayout(main_layout)
-        
-        self.ask_button.clicked.connect(self.accept)
-        self.prompt_edit.returnPressed.connect(self.accept)
 
+        self.ask_button.clicked.connect(self._on_accept)
+        self.prompt_edit.returnPressed.connect(self._on_accept)
+
+        # Fires regardless of which child widget currently holds focus, mirroring the
+        # Escape-closes-the-dialog behavior QDialog used to give this for free.
+        escape_shortcut = QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Escape), self)
+        escape_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        escape_shortcut.activated.connect(self._on_cancel)
+
+        self.setVisible(False)
+
+    @staticmethod
+    def _set_index(combo, index):
+        """Selects a restored index, clamped: a value saved by a different version of this
+        panel could fall outside the current list of choices."""
+        combo.setCurrentIndex(max(0, min(int(index), combo.count() - 1)))
+
+    def open_for_input(self):
+        """Shows the panel pre-filled with the last-used values, ready for typing."""
+        self.prompt_edit.setText(CustomPromptPanel.last_prompt)
+        self._set_index(self.frames_combo, CustomPromptPanel.last_frames_index)
+        self._set_index(self.interval_combo, CustomPromptPanel.last_interval_index)
+        self._set_index(self.words_combo, CustomPromptPanel.last_words_index)
+        self.setVisible(True)
         # Select the pre-filled text from last time so typing replaces it immediately.
         self.prompt_edit.setFocus()
         self.prompt_edit.selectAll()
 
-    def accept(self):
-        CustomPromptDialog.last_prompt = self.prompt_edit.text()
-        CustomPromptDialog.last_frames_index = self.frames_combo.currentIndex()
-        CustomPromptDialog.last_interval_index = self.interval_combo.currentIndex()
-        CustomPromptDialog.last_words_index = self.words_combo.currentIndex()
-        CustomPromptDialog.last_frames_val = int(self.frames_combo.currentText())
-        CustomPromptDialog.last_interval_val = float(self.interval_combo.currentText())
-        CustomPromptDialog.last_words_val = int(self.words_combo.currentText())
-        super().accept()
-    
-    def get_data(self):
-        return (self.prompt_edit.text(), int(self.frames_combo.currentText()), float(self.interval_combo.currentText()),
-                int(self.words_combo.currentText()))
+    def _on_accept(self):
+        CustomPromptPanel.last_prompt = self.prompt_edit.text()
+        CustomPromptPanel.last_frames_index = self.frames_combo.currentIndex()
+        CustomPromptPanel.last_interval_index = self.interval_combo.currentIndex()
+        CustomPromptPanel.last_words_index = self.words_combo.currentIndex()
+        CustomPromptPanel.last_frames_val = int(self.frames_combo.currentText())
+        CustomPromptPanel.last_interval_val = float(self.interval_combo.currentText())
+        CustomPromptPanel.last_words_val = int(self.words_combo.currentText())
+        self.setVisible(False)
+        self.accepted.emit(CustomPromptPanel.last_prompt, CustomPromptPanel.last_frames_val,
+                            CustomPromptPanel.last_interval_val, CustomPromptPanel.last_words_val)
+
+    def _on_cancel(self):
+        if not self.isVisible():
+            return
+        self.setVisible(False)
+        self.cancelled.emit()
 
 class ApiKeyDialog(QDialog):
     """One password-masked field per provider; a saved key shows as "********" instead of its value."""
@@ -172,8 +209,14 @@ class ModelMenuDialog(QDialog):
             is_local = m.get("provider_id") == "local"
             has_key = True if is_local else bool(api_keys_dict.get(m["provider_id"]))
             prefix = "[x] " if m["model_id"] == current_model_id else "[ ] "
-            suffix = " [Offline, no API key needed]" if is_local else ("" if has_key else " [Add API Key]")
-            text = f"{prefix}{m['model_name']} ({m['provider_name']}){suffix}"
+            # An offline entry's name already says everything that matters (size, quality);
+            # repeating the provider and a no-API-key note on every line only lengthens what
+            # a screen reader has to read out before reaching the next model.
+            if is_local:
+                text = f"{prefix}{m['model_name']}"
+            else:
+                suffix = "" if has_key else " [Add API Key]"
+                text = f"{prefix}{m['model_name']} ({m['provider_name']}){suffix}"
             
             self.list_widget.addItem(text)
             if m["model_id"] == current_model_id:
@@ -585,7 +628,9 @@ class SettingsDialog(QDialog):
         current_idx = max(0, self.offline_combo.currentIndex())
         self.offline_combo.clear()
         for m in LOCAL_MODELS:
-            state = "Downloaded" if local_vlm.is_model_downloaded(m) else f"Not downloaded, {m['size_gb']} gigabytes"
+            # The size is part of the name now, so repeating it here would just make
+            # the line longer to listen to.
+            state = "Downloaded" if local_vlm.is_model_downloaded(m) else "Not downloaded"
             self.offline_combo.addItem(f"{m['model_name']} — {state}")
         if self.offline_combo.count() > current_idx:
             self.offline_combo.setCurrentIndex(current_idx)

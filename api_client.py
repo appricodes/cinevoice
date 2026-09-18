@@ -20,13 +20,13 @@ class MultiClient:
         )
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
        
-    def send(self, model_dict: dict, frames_b64: list, system_prompt: str, user_text_blocks: list, expect_json: bool = False, history: list = None, language: str = None) -> dict:
+    def send(self, model_dict: dict, frames_b64: list, system_prompt: str, user_text_blocks: list, expect_json: bool = False, history: list = None, language: str = None, stream_cb=None) -> dict:
         provider = model_dict.get("provider_id")
         model = model_dict.get("model_id")
         url = model_dict.get("endpoint")
 
         if provider == "local":
-            return self._send_local(model_dict, frames_b64, system_prompt, user_text_blocks, history, language)
+            return self._send_local(model_dict, frames_b64, system_prompt, user_text_blocks, history, language, stream_cb)
 
 
         api_key = self.keys.get(provider)
@@ -58,16 +58,22 @@ class MultiClient:
             "Content-Type": "application/json"
         }
         
+        resp = None
         try:
             resp = self.session.post(url, headers=headers, json=payload, timeout=300)
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.HTTPError as e:
+            # resp is normally set by the line above, but requests can raise HTTPError from
+            # the post itself; reading resp.status_code then would be a NameError, replacing
+            # the real error with a crash.
+            if resp is None:
+                return {"error": f"API Error ({provider}): {e}"}
             return {"error": f"API Error ({provider}): Status {resp.status_code}. {resp.text}"}
         except Exception as e:
             return {"error": f"Network Error: {str(e)}"}
 
-    def _send_local(self, model_dict: dict, frames_b64: list, system_prompt: str, user_text_blocks: list, history: list = None, language: str = None) -> dict:
+    def _send_local(self, model_dict: dict, frames_b64: list, system_prompt: str, user_text_blocks: list, history: list = None, language: str = None, stream_cb=None) -> dict:
         # Wraps the result in the same {"choices": [...]} shape as the online providers
         # above, so callers never need to know whether a model ran locally or remotely.
         try:
@@ -80,7 +86,8 @@ class MultiClient:
                 user_text=user_text,
                 history=history,
                 status_cb=self.status_cb,
-                language=language
+                language=language,
+                chunk_cb=stream_cb
             )
             return {"choices": [{"message": {"content": text}}]}
         except Exception as e:

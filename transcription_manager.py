@@ -9,7 +9,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 import speech_recognition as sr
 
 from utils import get_speech_lang_code
-from ui_components import CustomPromptDialog
+from ui_components import CustomPromptPanel
 
 class TranscriptionManager(QObject):
     """Coordinates microphone capture and speech-to-text for voice-driven prompts."""
@@ -45,9 +45,10 @@ class TranscriptionManager(QObject):
                 
                 prompt_data = {
                     "title": "custom", "prompt": text,
-                    "frames_count": CustomPromptDialog.last_frames_val,
-                    "frames_interval": CustomPromptDialog.last_interval_val,
-                    "max_words": CustomPromptDialog.last_words_val
+                    "frames_count": CustomPromptPanel.last_frames_val,
+                    "frames_interval": CustomPromptPanel.last_interval_val,
+                    "max_words": CustomPromptPanel.last_words_val,
+                    "is_question": True
                 }
                 cur_ms = self.mw.player.position()
                 if cur_ms is not None and cur_ms >= 0:

@@ -14,6 +14,20 @@ import threading
 from config import LOCAL_MODELS, get_local_models_dir
 
 DOWNLOAD_MARKER = ".download_complete"
+# What VLMPipeline needs before it will load a model directory at all. The language model
+# alone is not enough: some published OpenVINO exports ship no openvino_tokenizer.xml, and
+# such a model downloads to 100%, reports itself ready, and then fails at load time with
+# "Tokenizer::encode is not available". Checking here turns that into an honest
+# "not downloaded" the user can act on, instead of a crash at the first description.
+REQUIRED_MODEL_FILES = (
+    "openvino_language_model.xml",
+    "openvino_tokenizer.xml",
+    "openvino_detokenizer.xml",
+)
+# Punctuation (Latin and Persian/Arabic) that marks a natural pause in speech: whenever the
+# streamed output crosses one of these, the sentence/clause so far is flushed to chunk_cb so
+# it can be spoken immediately instead of waiting for the whole (slow) local generation to finish.
+_CHUNK_BREAK_RE = re.compile(r"[.,!?;:،؛؟]")
 
 _engine_lock = threading.Lock()
 _pipeline = None
@@ -27,8 +41,9 @@ def get_model_dir(model_dict: dict) -> str:
 
 def is_model_downloaded(model_dict: dict) -> bool:
     model_dir = get_model_dir(model_dict)
-    return (os.path.isfile(os.path.join(model_dir, DOWNLOAD_MARKER))
-            and os.path.isfile(os.path.join(model_dir, "openvino_language_model.xml")))
+    if not os.path.isfile(os.path.join(model_dir, DOWNLOAD_MARKER)):
+        return False
+    return all(os.path.isfile(os.path.join(model_dir, f)) for f in REQUIRED_MODEL_FILES)
 
 
 def get_downloaded_local_models() -> list:
@@ -83,7 +98,9 @@ def download_model(model_dict: dict, progress_cb=None, cancel_event=None) -> tup
     import requests
     from urllib.parse import quote
 
-    repo = model_dict["hf_repo"]
+    repo = model_dict.get("hf_repo")
+    if not repo:
+        return False, f"{model_dict['model_name']} was added locally and has no source to re-download from."
     target_dir = get_model_dir(model_dict)
     os.makedirs(target_dir, exist_ok=True)
 
@@ -137,6 +154,12 @@ def download_model(model_dict: dict, progress_cb=None, cancel_event=None) -> tup
             os.replace(part, dest)
     except Exception as e:
         return False, f"Download failed: {e}. It will resume next time."
+
+    missing = [f for f in REQUIRED_MODEL_FILES if not os.path.isfile(os.path.join(target_dir, f))]
+    if missing:
+        return False, (f"{model_dict['model_name']} downloaded, but the published files are "
+                       f"incomplete ({', '.join(missing)} is missing), so it cannot be loaded. "
+                       "This is a problem with the published model, not with your download.")
 
     try:
         with open(os.path.join(target_dir, DOWNLOAD_MARKER), "w") as f:
@@ -219,8 +242,8 @@ def _b64_to_tensor(frame_b64: str):
 def _fold_history(history: list, current_text: str) -> str:
     """
     Flattens prior conversation turns into the prompt since the local pipeline
-    is used statelessly. Skips a trailing duplicate of the current user text
-    (the caller appends the current prompt to history before sending).
+    is used statelessly. Defensively skips a trailing duplicate of the current
+    user text, in case a caller passes a history that already ends with it.
     """
     if not history:
         return current_text
@@ -258,12 +281,17 @@ def _enforce_language(prompt: str, language: str) -> str:
 
 
 def generate(model_dict: dict, frames_b64: list, system_prompt: str, user_text: str,
-             history: list = None, max_new_tokens: int = 1024, status_cb=None, language: str = None) -> str:
+             history: list = None, max_new_tokens: int = 1024, status_cb=None, language: str = None,
+             chunk_cb=None) -> str:
     """
     Runs one full multimodal generation on the local model and returns plain text.
     Serialized by a lock: only one local inference can run at a time.
+
+    If chunk_cb is given, it is called with each sentence/clause as soon as the streamed
+    output crosses a punctuation mark (see _CHUNK_BREAK_RE), so the caller can announce it
+    immediately rather than waiting for this (slow) generation to finish. Any trailing text
+    with no closing punctuation is flushed to chunk_cb once generation ends.
     """
-    model_dir = get_model_dir(model_dict)
     if not is_model_downloaded(model_dict):
         raise RuntimeError("This offline model is not downloaded. Open Settings with Control plus S to download it.")
 
@@ -275,18 +303,35 @@ def generate(model_dict: dict, frames_b64: list, system_prompt: str, user_text: 
     prompt = _enforce_language(prompt, language)
 
     with _engine_lock:
+        model_dir = get_model_dir(model_dict)
         pipe = _get_pipeline(model_dir, status_cb)
         tensors = [_b64_to_tensor(b) for b in frames]
         if status_cb:
             status_cb(f"Offline model is generating on {_device_used}. This may be slow...")
 
         def _run(images):
+            buffer = [""]
+
+            def streamer(subword: str):
+                buffer[0] += subword
+                while True:
+                    match = _CHUNK_BREAK_RE.search(buffer[0])
+                    if not match:
+                        break
+                    piece, buffer[0] = buffer[0][:match.end()].strip(), buffer[0][match.end():]
+                    if piece:
+                        chunk_cb(piece)
+                return False
+
             pipe.start_chat(system_prompt)
             try:
+                gen_kwargs = {"streamer": streamer} if chunk_cb else {}
                 return pipe.generate(prompt, images=images,
-                                     max_new_tokens=max_new_tokens, do_sample=False)
+                                     max_new_tokens=max_new_tokens, do_sample=False, **gen_kwargs)
             finally:
                 pipe.finish_chat()
+                if chunk_cb and buffer[0].strip():
+                    chunk_cb(buffer[0].strip())
 
         try:
             try:

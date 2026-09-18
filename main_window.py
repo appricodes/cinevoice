@@ -6,18 +6,18 @@ input to TranscriptionManager.
 import os
 import sys
 import webbrowser
-from PySide6 import QtWidgets, QtCore, QtGui
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QLabel, QApplication, QDialog
+from PySide6 import QtCore, QtGui
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QLabel, QDialog
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QSettings
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtTextToSpeech import QTextToSpeech
 
 import settings
-from config import SEEK_MS, MODELS
+from config import SEEK_MS, MODELS, MEDIA_EXTS, MEDIA_FILE_DIALOG_FILTER
 from utils import clean_string
 from api_client import MultiClient
-from ui_components import ClickableSlider, SettingsDialog, LastOutputDialog, CommandMenuDialog, ModelMenuDialog, ApiKeyDialog, DownloadProgressDialog
+from ui_components import ClickableSlider, SettingsDialog, LastOutputDialog, CommandMenuDialog, ModelMenuDialog, ApiKeyDialog, DownloadProgressDialog, CustomPromptPanel
 
 from transcription_manager import TranscriptionManager
 from vision_manager import VisionManager
@@ -44,7 +44,10 @@ class VideoPlayerWidget(QWidget):
             self.prompts_list = [{"title": "1: Default", "prompt": "Describe this scene.", "frames_count": 1, "frames_interval": 0.5}]
         self.current_prompt_data = self.prompts_list[0]
         
-        self.current_mode = settings.MODES[0] if settings.MODES else "Family"
+        # The writing style is remembered between runs, like the language and the model.
+        default_mode = settings.MODES[0] if settings.MODES else "Family"
+        saved_mode = self.q_settings.value("current_mode", default_mode)
+        self.current_mode = saved_mode if saved_mode in settings.MODES else default_mode
         default_lang = settings.LANGUAGES[0] if settings.LANGUAGES else "English"
         self.current_language = self.q_settings.value("current_language", default_lang)
         self.current_max_words = 120
@@ -97,6 +100,12 @@ class VideoPlayerWidget(QWidget):
         self.progress_layout.addWidget(self.progress_slider)
         self.progress_layout.addWidget(self.time_remaining_label)
         self.main_layout.addLayout(self.progress_layout, 0)
+
+        # Embedded, hidden-until-needed instead of a separate QDialog: see CustomPromptPanel's
+        # docstring for why (it's about screen readers re-announcing the main window's title).
+        self.custom_prompt_panel = CustomPromptPanel(self)
+        self.main_layout.addWidget(self.custom_prompt_panel, 0)
+
         self.setLayout(self.main_layout)
         
         self.audio_output = QAudioOutput(self)
@@ -127,9 +136,9 @@ class VideoPlayerWidget(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_keys = dialog.get_keys()
             from auth import save_api_keys, load_api_keys
-            save_api_keys(new_keys)
+            ok, message = save_api_keys(new_keys)
             self.api_client.keys = load_api_keys()
-            self.speak("API keys updated.")
+            self.speak("API keys updated." if ok else message)
 
     def get_available_models(self) -> list:
         """Returns online models plus any offline models that are fully downloaded."""
@@ -214,7 +223,7 @@ class VideoPlayerWidget(QWidget):
     
     def open_and_play(self):
         last_dir = self.q_settings.value("last_directory", os.path.dirname(self.media_path) if self.media_path else ".")
-        path, _ = QFileDialog.getOpenFileName(self, "Select video file", last_dir, "Video Files (*.mp4 *.avi *.mkv *.mov *.wmv);;All Files (*.*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Select video or image file", last_dir, MEDIA_FILE_DIALOG_FILTER)
         if path:
             self.q_settings.setValue("last_directory", os.path.dirname(path))
             self.load_video(path)
@@ -252,8 +261,7 @@ class VideoPlayerWidget(QWidget):
         try:
             current_dir = os.path.dirname(os.path.abspath(self.media_path))
             current_file = os.path.basename(self.media_path)
-            valid_exts = {'.mp4', '.avi', '.mkv', '.mov', '.wmv'}
-            files = sorted([f for f in os.listdir(current_dir) if os.path.splitext(f)[1].lower() in valid_exts])
+            files = sorted([f for f in os.listdir(current_dir) if os.path.splitext(f)[1].lower() in MEDIA_EXTS])
             if current_file in files:
                 new_idx = files.index(current_file) + direction
                 if 0 <= new_idx < len(files):
@@ -295,6 +303,10 @@ class VideoPlayerWidget(QWidget):
                         self.updateStatus.emit("Buffering description for next 30 seconds...")
                         self.speak("Waiting for narrative context...")
                         self.vision_manager.waiting_for_block = block_idx
+                        # Ask for it. Seeking into a stretch where the current and next
+                        # blocks were both already cached leaves no fetch running, and
+                        # nothing else would ever start one -- the video would sit paused.
+                        self.vision_manager.check_and_fetch_lookahead()
     
     def _check_end_reached(self, status):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -410,6 +422,7 @@ class VideoPlayerWidget(QWidget):
                 idx = key - Qt.Key.Key_F1
                 if 0 <= idx < len(settings.MODES):
                     self.current_mode = settings.MODES[idx]
+                    self.q_settings.setValue("current_mode", self.current_mode)
                     self.speak(self.current_mode)
             elif key == Qt.Key.Key_A:
                 self.vision_manager.show_custom_prompt_dialog()
@@ -560,8 +573,13 @@ class VideoPlayerWidget(QWidget):
                 handled = False
         else:
             handled = False
-        
-        super().keyPressEvent(event)
+
+        # Shortcuts the app acts on are consumed here; anything else goes to the base class
+        # so Qt's own handling (tab order, accelerators) still works.
+        if handled:
+            event.accept()
+        else:
+            super().keyPressEvent(event)
     
     def closeEvent(self, event):
         self.vision_manager.auto_describe_timer.stop()

@@ -12,16 +12,24 @@ from PySide6.QtMultimedia import QMediaPlayer
 
 from config import MAX_IMAGE_DIM, MP4_METADATA_EXTS
 from utils import clean_string, encode_and_resize_frame
-from ui_components import CustomPromptDialog, ExistingDescriptionDialog
+from ui_components import ExistingDescriptionDialog
 import mp4_metadata
 
 class VisionManager(QObject):
     """Owns all frame-capture and AI-description logic; one instance per open video."""
-    grokResponseReady = Signal(object)  # named after the original provider; now fires for any model
+    grokResponseReady = Signal(object, bool)  # named after the original provider; now fires for any model
     lookaheadBlockReady = Signal(int, str)
     batchCompleteSignal = Signal()
     fullStoryReady = Signal(str)
-    
+    streamChunkReady = Signal(str)
+    lookaheadFailed = Signal(int, str)
+
+    # How many messages of question/answer context travel with each request. Without a cap
+    # the history grows for as long as the app is open -- auto-describe alone adds a turn
+    # every five seconds -- and every request re-sends all of it, so cost and latency climb
+    # with no upper bound.
+    MAX_HISTORY_MESSAGES = 12
+
     def __init__(self, main_window):
         super().__init__()
         self.mw = main_window
@@ -42,11 +50,52 @@ class VisionManager(QObject):
         self.auto_describe_timer = QTimer(self)
         self.auto_describe_timer.setInterval(5000)
         self.auto_describe_timer.timeout.connect(self.on_auto_describe_tick)
-        
+
+        # Tracks what a currently-open custom_prompt_panel is for: None means a plain
+        # question (Ctrl+A), an int means "assign to this F-key slot" (assign_custom_prompt).
+        # Only one can be open at a time, so one pair of fields is enough to remember it
+        # between open_for_input() and the panel's accepted/cancelled signal firing back.
+        self._pending_prompt_slot = None
+        self._prompt_was_playing = False
+        self.mw.custom_prompt_panel.accepted.connect(self._on_custom_prompt_accepted)
+        self.mw.custom_prompt_panel.cancelled.connect(self._on_custom_prompt_cancelled)
+
         self.grokResponseReady.connect(self.handle_grok_response)
         self.lookaheadBlockReady.connect(self.handle_lookahead_ready)
         self.batchCompleteSignal.connect(self.on_batch_complete)
         self.fullStoryReady.connect(self.handle_full_story_ready)
+        self.streamChunkReady.connect(self.handle_stream_chunk)
+        self.lookaheadFailed.connect(self.handle_lookahead_failed)
+
+    def _append_history(self, role: str, content: str):
+        """Records one conversation turn, keeping only the most recent MAX_HISTORY_MESSAGES."""
+        with self._history_lock:
+            self.chat_history.append({"role": role, "content": content})
+            if len(self.chat_history) > self.MAX_HISTORY_MESSAGES:
+                del self.chat_history[:-self.MAX_HISTORY_MESSAGES]
+
+    def start_prompt(self, timestamp_ms: int, prompt_data: dict, announce_busy: bool = True) -> bool:
+        """
+        Runs one prompt on a worker thread, unless one is already running.
+
+        _inflight is set here, before the thread starts, rather than inside the worker: set
+        from the worker it would already be too late, and a second key press could slip past
+        the check and have two answers spoken over each other.
+        """
+        if self._inflight:
+            if announce_busy:
+                self.mw.speak("Still working on the previous request.")
+            return False
+        self._inflight = True
+
+        def run():
+            try:
+                self.execute_prompt(timestamp_ms, prompt_data)
+            finally:
+                self._inflight = False
+
+        threading.Thread(target=run, daemon=True).start()
+        return True
 
     def _is_local_model(self) -> bool:
         return self.mw.current_model_dict.get("provider_id") == "local"
@@ -100,46 +149,48 @@ class VisionManager(QObject):
                 pass
 
     def assign_custom_prompt(self, slot):
-        was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-        if was_playing: self.mw.player.pause()
-        
-        dialog = CustomPromptDialog(self.mw)
-        dialog.setWindowTitle(f"Assign Custom Prompt F{slot}")
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            if was_playing: self.mw.player.play()
-            prompt_text, frames_count, frames_interval, max_words = dialog.get_data()
+        if self.mw.custom_prompt_panel.isVisible(): return
+        self._pending_prompt_slot = slot
+        self._prompt_was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        if self._prompt_was_playing: self.mw.player.pause()
+        self.mw.speak(f"Assign custom prompt to F{slot}.")
+        self.mw.custom_prompt_panel.open_for_input()
+
+    def show_custom_prompt_dialog(self):
+        if self.mw.custom_prompt_panel.isVisible(): return
+        self._pending_prompt_slot = None
+        self._prompt_was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        if self._prompt_was_playing: self.mw.player.pause()
+        self.mw.speak("Ask a question.")
+        self.mw.custom_prompt_panel.open_for_input()
+
+    def _on_custom_prompt_accepted(self, prompt_text, frames_count, frames_interval, max_words):
+        if self._prompt_was_playing: self.mw.player.play()
+        self.mw.video_widget.setFocus()
+
+        slot = self._pending_prompt_slot
+        if slot is not None:
             prompt_data = {"title": f"Custom {slot - 6}", "prompt": prompt_text, "frames_count": frames_count,
-                           "frames_interval": frames_interval, "max_words": max_words}
-            
+                           "frames_interval": frames_interval, "max_words": max_words,
+                           "is_question": True}
             if slot == 7:
                 self.mw.custom_prompt_f7 = prompt_data
             elif slot == 8:
                 self.mw.custom_prompt_f8 = prompt_data
             self.mw.current_prompt_data = prompt_data
-            
             self.mw.speak(f"Assigned to F{slot}. Processing...")
-            cur_ms = self.mw.player.position()
-            if cur_ms is not None and cur_ms >= 0:
-                threading.Thread(target=self.execute_prompt, args=(cur_ms, self.mw.current_prompt_data), daemon=True).start()
         else:
-            if was_playing: self.mw.player.play()
-            self.mw.video_widget.setFocus()
-    
-    def show_custom_prompt_dialog(self):
-        was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-        if was_playing: self.mw.player.pause()
-        
-        dialog = CustomPromptDialog(self.mw)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            if was_playing: self.mw.player.play()
-            prompt_text, frames_count, frames_interval, max_words = dialog.get_data()
             self.mw.current_prompt_data = {"title": "custom", "prompt": prompt_text, "frames_count": frames_count,
-                                           "frames_interval": frames_interval, "max_words": max_words}
-            cur_ms = self.mw.player.position()
-            threading.Thread(target=self.execute_prompt, args=(cur_ms, self.mw.current_prompt_data), daemon=True).start()
-        else:
-            if was_playing: self.mw.player.play()
-            self.mw.video_widget.setFocus()
+                                           "frames_interval": frames_interval, "max_words": max_words,
+                                           "is_question": True}
+
+        cur_ms = self.mw.player.position()
+        if cur_ms is not None and cur_ms >= 0:
+            self.start_prompt(cur_ms, self.mw.current_prompt_data)
+
+    def _on_custom_prompt_cancelled(self):
+        if self._prompt_was_playing: self.mw.player.play()
+        self.mw.video_widget.setFocus()
     
     def trigger_current_prompt(self):
         self.mw.speak(self.mw.current_prompt_data.get('title', 'Processing'))
@@ -147,8 +198,55 @@ class VisionManager(QObject):
         with self._history_lock: self.chat_history.clear()
         cur_ms = self.mw.player.position()
         if cur_ms is not None and cur_ms >= 0:
-            threading.Thread(target=self.execute_prompt, args=(cur_ms, self.mw.current_prompt_data), daemon=True).start()
+            self.start_prompt(cur_ms, self.mw.current_prompt_data)
     
+    def _build_system_prompt(self, is_question: bool, frame_count: int, max_words: int) -> str:
+        """
+        Builds the system prompt for one request.
+
+        A free-form request -- a typed question (Ctrl+A), a spoken one (Ctrl+Shift+A), or a
+        custom prompt on F7/F8 -- gets a deliberately open prompt. These used to be given the
+        same "cinematic audio describer" prompt as the F1-F6 description keys, whose persona
+        and describe-only rules pushed the model into narrating the scene rather than
+        answering what was asked, so neither survives here. The writing style does: it comes
+        last and shapes only the wording, after the question itself has set the answer.
+        """
+        # Several frames are consecutive moments of one shot, not unrelated pictures.
+        # Unsaid, the model tends to walk through them one at a time, which is why a
+        # question answered badly got worse the more frames were attached to it.
+        frames_note = ""
+        if frame_count > 1:
+            frames_note = (f"The {frame_count} images are consecutive moments from the video, "
+                           f"oldest first; read them as one continuous scene. ")
+
+        # Local models are small and quantized: a short, single-clause instruction is
+        # followed far more reliably than the longer, multi-rule prompt used for the big
+        # online models (language is handled separately, right before generation, by
+        # local_vlm._enforce_language, so it's omitted here).
+        if self._is_local_model():
+            if is_question:
+                return (f"{frames_note}Answer the user's question. "
+                        f"Tone: {self.mw.current_mode}. Under {max_words} words.")
+            return (f"Describe the scene. Style: {self.mw.current_mode}. "
+                    f"Under {max_words} words. Do not say 'image' or 'frame'.")
+
+        if is_question:
+            return (f"You are watching this video with the user and answering their questions about it. "
+                    f"Respond in {self.mw.current_language}. "
+                    f"{frames_note}"
+                    f"Answer what was actually asked, and let the question decide the shape of the answer -- "
+                    f"describe the scene only when the question asks for a description. "
+                    f"If the video does not show enough to answer, say so. "
+                    f"Word the answer in a '{self.mw.current_mode}' tone. "
+                    f"Keep it under {max_words} words.")
+
+        return (f"You are a professional cinematic audio describer. Respond in {self.mw.current_language} using a '{self.mw.current_mode}' style. "
+                f"Limit to {max_words} words. "
+                f"CRITICAL INSTRUCTIONS: "
+                f"1. Never use words like 'image', 'frame', 'picture', or 'shows'. Treat the visual input as a living, unfolding world. "
+                f"2. Write in the immediate present tense and active voice. "
+                f"3. Strictly describe ONLY what is actually, physically present in the scene. Do not hallucinate or assume unseen events.")
+
     def execute_prompt(self, timestamp_ms: int, prompt_data: dict):
         """Grabs the frame(s) prompt_data asks for around timestamp_ms and sends them to the AI model."""
         import cv2
@@ -184,28 +282,24 @@ class VisionManager(QObject):
             
             final_user_prompt = prompt_text
 
-            # Local models are small and quantized: a short, single-clause instruction is
-            # followed far more reliably than the long, multi-rule prompt used for the big
-            # online models (language is handled separately, right before generation, by
-            # local_vlm._enforce_language, so it's omitted here).
-            if self._is_local_model():
-                system_prompt_string = (
-                    f"Describe the scene. Style: {self.mw.current_mode}. "
-                    f"Under {max_words} words. Do not say 'image' or 'frame'."
-                )
-            else:
-                system_prompt_string = (
-                    f"You are a professional cinematic audio describer. Respond in {self.mw.current_language} using a '{self.mw.current_mode}' style. "
-                    f"Limit to {max_words} words. "
-                    f"CRITICAL INSTRUCTIONS: "
-                    f"1. Never use words like 'image', 'frame', 'picture', or 'shows'. Treat the visual input as a living, unfolding world. "
-                    f"2. Write in the immediate present tense and active voice. "
-                    f"3. Strictly describe ONLY what is actually, physically present in the scene. Do not hallucinate or assume unseen events."
-                )
+            system_prompt_string = self._build_system_prompt(
+                is_question=bool(prompt_data.get('is_question')),
+                frame_count=len(captured_frames_b64),
+                max_words=max_words,
+            )
             
             with self._history_lock:
-                self.chat_history.append({"role": "user", "content": final_user_prompt})
-            
+                # Snapshot before appending: the current question is sent on its own below,
+                # as the real user message carrying the frames, so leaving it in the history
+                # as well would deliver it to the model twice.
+                history_snapshot = list(self.chat_history)
+            self._append_history("user", final_user_prompt)
+
+            is_local = self._is_local_model()
+            # Local models are slow enough that waiting for the full response before saying
+            # anything is a poor experience: stream it out clause by clause as it's generated.
+            stream_cb = self.streamChunkReady.emit if is_local else None
+
             self.mw.updateStatus.emit(f"Sending frames to API...")
             response = self.mw.api_client.send(
                 model_dict=self.mw.current_model_dict,
@@ -213,12 +307,13 @@ class VisionManager(QObject):
                 system_prompt=system_prompt_string,
                 user_text_blocks=[final_user_prompt],
                 expect_json=False,
-                history=self.chat_history,
-                language=self.mw.current_language
+                history=history_snapshot,
+                language=self.mw.current_language,
+                stream_cb=stream_cb
             )
-            self.grokResponseReady.emit(response)
+            self.grokResponseReady.emit(response, is_local)
         except Exception as e:
-            self.grokResponseReady.emit({"error": f"Execution failed: {e}"})
+            self.grokResponseReady.emit({"error": f"Execution failed: {e}"}, False)
     
     @Slot()
     def on_auto_describe_tick(self):
@@ -228,26 +323,46 @@ class VisionManager(QObject):
         if cur_ms is None or cur_ms < 5000: return
         auto_prompt_data = {"title": "Auto-Describe-Diff", "prompt": "Describe only new changes in the scene.",
                             "frames_count": 2, "frames_interval": 5.0}
-        self._inflight = True
-        def run():
-            try:
-                self.execute_prompt(cur_ms, auto_prompt_data)
-            finally:
-                self._inflight = False
-        threading.Thread(target=run, daemon=True).start()
+        # Silent when busy: this fires every five seconds and would otherwise nag.
+        self.start_prompt(cur_ms, auto_prompt_data, announce_busy=False)
     
-    @Slot(object)
-    def handle_grok_response(self, response):
+    @Slot(str)
+    def handle_stream_chunk(self, chunk: str):
+        """Announces one streamed clause/sentence from a local model as soon as it's ready."""
+        self.mw.speak(chunk)
+
+    @Slot(object, bool)
+    def handle_grok_response(self, response, streamed_locally: bool = False):
         """Speaks the AI's reply (or the error) and records it in chat_history for follow-up questions."""
         desc = "Error: Unknown response failure."
+        is_error = True
+        already_spoken = False
         if response and isinstance(response, dict):
             if "choices" in response:
                 desc = response["choices"][0]["message"]["content"].strip()
+                is_error = False
+                # A local model's response was already spoken piece by piece as it streamed in.
+                already_spoken = streamed_locally
             elif "error" in response:
                 desc = response["error"]
-        self.mw.speak(clean_string(desc))
-        with self._history_lock:
-            self.chat_history.append({"role": "assistant", "content": desc})
+        desc = clean_string(desc)
+
+        if not already_spoken:
+            self.mw.speak(desc)
+        else:
+            # Each streamed chunk overwrote last_spoken_text on its way out, leaving only the
+            # final clause there; put the whole reply back so Ctrl+R repeats all of it.
+            self.mw.last_spoken_text = desc
+
+        if is_error:
+            # Keep the failure out of the conversation: as an assistant turn it would be fed
+            # back as context on the next question, and the unanswered question ahead of it
+            # would read as one the model had ignored.
+            with self._history_lock:
+                if self.chat_history and self.chat_history[-1].get("role") == "user":
+                    self.chat_history.pop()
+            return
+        self._append_history("assistant", desc)
     
     def init_lookahead_data(self):
         """Loads any 30-second block descriptions already saved for this video: embedded in
@@ -317,11 +432,27 @@ class VisionManager(QObject):
         self.fetching_block = target_idx
         threading.Thread(target=self._fetch_lookahead_worker, args=(target_idx,), daemon=True).start()
     
-    def describe_block(self, media_path: str, block_idx: int, prev_desc: str = None) -> str:
+    def _recent_block_descriptions(self, block_idx: int, count: int = 3) -> list:
         """
-        Describes the 30-second block at block_idx using 3 sampled frames. prev_desc, the
-        previous block's description, is included as context so consecutive blocks read as
-        one continuous story rather than restarting cold each time.
+        The descriptions of the blocks just before block_idx, oldest first.
+
+        More than one is needed. With only the immediately preceding block as context the
+        model has no idea what was established two blocks ago, so it re-introduces the same
+        room, the same people and the same furniture every minute or so.
+        """
+        recent = []
+        for i in range(max(0, block_idx - count), block_idx):
+            desc = self.lookahead_data.get(i, "")
+            if desc and not desc.startswith("Error"):
+                recent.append(desc)
+        return recent
+
+    def describe_block(self, media_path: str, block_idx: int) -> str:
+        """
+        Describes the 30-second block at block_idx using 3 sampled frames, as live audio
+        description for a blind listener: only what is new in those 30 seconds, never a
+        re-description of what the preceding blocks already said. The descriptions of the
+        blocks just before this one are sent along so the model knows what is already known.
         """
         import cv2
         start_ms = block_idx * 30000
@@ -343,30 +474,42 @@ class VisionManager(QObject):
         
         if not frames_b64: return "Error: No frames extracted."
 
+        prev_descs = self._recent_block_descriptions(block_idx)
+
+        # This is audio description, not storytelling. The old prompt asked for "just enough
+        # scene detail -- setting, mood, who's involved -- to help the listener picture it"
+        # on every single block, which is the instruction that made the man sit down on the
+        # same wooden chair again every 30 seconds. What the listener needs is only what
+        # changed since the last block, plus permission to say little when little happens.
         if self._is_local_model():
             system_prompt = (
-                f"Narrate these frames as the next part of an ongoing story, in chronological order. "
-                f"Skip small movements like glances or gestures unless they matter to the story. "
+                f"Audio description for a blind listener. Say only what is new or what changes in these frames. "
+                f"Do not repeat anything already described. Tone: {self.mw.current_mode}. "
                 f"Under {self.mw.current_max_words} words. Do not say 'image' or 'frame'."
             )
-            user_text = "Continue the story with what happens next."
-            if prev_desc:
-                user_text += f" So far: {prev_desc}"
+            user_text = "What happens in these 30 seconds?"
+            # Small local models lose the thread in long context: give them the last block only.
+            if prev_descs:
+                user_text += f" Already described, do not repeat: {prev_descs[-1]}"
         else:
             system_prompt = (
-                f"You are a professional cinematic audio describer. Respond in {self.mw.current_language}. "
+                f"You are giving live audio description of a video to a blind listener, in {self.mw.current_language}. "
+                f"These {len(frames_b64)} frames are the next 30 seconds, in chronological order. "
                 f"Limit to {self.mw.current_max_words} words. "
-                f"Tell this block as the next chronological beat in one ongoing story. "
                 f"CRITICAL INSTRUCTIONS: "
-                f"1. Never use words like 'image', 'frame', or 'shows'. Treat the input as a living world. "
-                f"2. Write in the immediate present tense and active voice. "
-                f"3. Narrate events in the order they happen, with just enough scene detail -- setting, mood, who's involved -- to help the listener picture it. "
-                f"4. Skip valueless micro-movements (a glance, a small gesture, a shift in posture) unless they actually matter to what's happening. "
-                f"5. Continue directly from where the previous block left off; never repeat or re-describe what already happened."
+                f"1. Report only what is NEW in these 30 seconds: what happens, what changes, anyone or anywhere not introduced yet, and any text that appears on screen. "
+                f"2. The listener has already heard every earlier description. Never restate it. A person, place or object they already know is referred to in a word or two, never described again. "
+                f"3. Describe a setting in full only the first time it appears, or when it genuinely changes. "
+                f"4. Write in the immediate present tense and active voice, and never use words like 'image', 'frame' or 'shows'. "
+                f"5. Skip micro-movements -- a glance, a small gesture, a shift in posture -- unless they matter to what is happening. "
+                f"6. If little changes in these 30 seconds, say so in a few words. A short description is correct; never pad it out by re-describing the scene. "
+                f"7. Word all of this in a '{self.mw.current_mode}' tone. The tone changes how it is worded, never what gets reported -- it can never justify re-describing the scene or padding a short description."
             )
-            user_text = "Narrate what happens next."
-            if prev_desc:
-                user_text += f"\n\nCONTEXT FROM PRECEDING SCENE:\n\"\"\"\n{prev_desc}\n\"\"\"\nContinue seamlessly from there without repeating or summarizing it."
+            user_text = "Describe what happens in these 30 seconds."
+            if prev_descs:
+                already = "\n\n".join(prev_descs)
+                user_text += (f"\n\nALREADY DESCRIBED TO THE LISTENER, oldest first -- none of this may be repeated:\n"
+                              f"\"\"\"\n{already}\n\"\"\"")
         
         try:
             self.mw.updateStatus.emit(f"Sending block {block_idx} to API...")
@@ -388,12 +531,25 @@ class VisionManager(QObject):
             return f"Error during block description: {e}"
 
     def _fetch_lookahead_worker(self, block_idx: int):
-        prev_desc = self.lookahead_data.get(block_idx - 1, "")
-        desc = self.describe_block(self.mw.media_path, block_idx, prev_desc)
+        desc = self.describe_block(self.mw.media_path, block_idx)
         if desc.startswith("Error"):
             self.fetching_block = -1
+            self.lookaheadFailed.emit(block_idx, desc)
         else:
             self.lookaheadBlockReady.emit(block_idx, desc)
+
+    @Slot(int, str)
+    def handle_lookahead_failed(self, block_idx: int, message: str):
+        """
+        A block's description could not be produced. If playback is paused waiting for
+        exactly that block, say what went wrong and let the video run again -- otherwise it
+        would sit frozen with nothing left on its way to un-freeze it.
+        """
+        if self.waiting_for_block != block_idx:
+            return
+        self.waiting_for_block = -1
+        self.mw.speak(clean_string(message))
+        self.mw.player.play()
     
     @Slot(int, str)
     def handle_lookahead_ready(self, block_idx: int, desc: str):
@@ -445,17 +601,16 @@ class VisionManager(QObject):
 
     def _batch_lookahead_worker(self, max_blocks: int):
         try:
-            prev_desc = ""
             for block_idx in range(max_blocks):
                 if block_idx in self.lookahead_data and not self.lookahead_data[block_idx].startswith("Error"):
-                    prev_desc = self.lookahead_data[block_idx]
                     continue
 
-                desc = self.describe_block(self.mw.media_path, block_idx, prev_desc)
+                # describe_block reads the preceding blocks out of lookahead_data itself,
+                # and each one lands there below before the next block is described.
+                desc = self.describe_block(self.mw.media_path, block_idx)
                 if desc and not desc.startswith("Error"):
                     self.lookahead_data[block_idx] = desc
                     self.save_lookahead_data()
-                    prev_desc = desc
         except Exception:
             pass
         finally:
@@ -545,20 +700,22 @@ class VisionManager(QObject):
 
             if self._is_local_model():
                 system_prompt = (
-                    f"Narrate these {len(frames_b64)} frames as one story. Style: {self.mw.current_mode}. "
-                    f"Under {self.mw.current_max_words} words. Do not say 'image' or 'frame'."
+                    f"Narrate these {len(frames_b64)} frames as one story. "
+                    f"Under {self.mw.current_max_words} words. Do not say 'image' or 'frame'. "
+                    f"Tone: {self.mw.current_mode}."
                 )
                 user_text = "Narrate the video from start to end."
             else:
                 system_prompt = (
                     f"You are a professional cinematic audio describer. Respond in {self.mw.current_language}. "
-                    f"Use a '{self.mw.current_mode}' writing style. Limit the story to exactly {self.mw.current_max_words} words. "
+                    f"Limit the story to exactly {self.mw.current_max_words} words. "
                     f"I am providing you with {len(frames_b64)} visual frames extracted every {interval_ms/1000:.1f} seconds, spanning the entire video. "
                     f"Translate these sequential visual moments into a seamless, continuous, real-time story. "
                     f"CRITICAL INSTRUCTIONS: "
                     f"1. Never use words like 'image', 'frame', or 'shows'. Treat the input as a living world. "
                     f"2. Write in the immediate present tense and active voice. "
-                    f"3. Weave the actions fluidly, naturally inferring the bridging movements between the gaps."
+                    f"3. Weave the actions fluidly, naturally inferring the bridging movements between the gaps. "
+                    f"4. Word all of this in a '{self.mw.current_mode}' tone. The tone changes how it is worded, never which events get told."
                 )
                 user_text = "Watch the entire sequence and narrate the unfolding events fluidly from beginning to end."
             self.mw.updateStatus.emit("Sending frames to API...")

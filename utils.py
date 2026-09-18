@@ -1,6 +1,5 @@
 """Small stateless helpers for text cleanup and video frame encoding."""
 import re
-import cv2
 import base64
 from config import GOOGLE_SPEECH_LANGUAGES
 
@@ -13,6 +12,10 @@ def clean_string(text: str) -> str:
 
 def encode_and_resize_frame(frame, max_dim: int, quality: int = 90) -> str:
     """Downscales an OpenCV BGR frame to max_dim on its longest side and JPEG-encodes it as base64."""
+    # Imported here, not at module scope: this module is pulled in by the main window, so a
+    # top-level import would load OpenCV during startup for every user, including the many
+    # who never capture a frame. vision_manager and local_vlm defer cv2 for the same reason.
+    import cv2
     h, w = frame.shape[:2]
     if max(h, w) > max_dim:
         scale = max_dim / max(h, w)
