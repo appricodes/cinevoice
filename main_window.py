@@ -51,6 +51,11 @@ class VideoPlayerWidget(QWidget):
         default_lang = settings.LANGUAGES[0] if settings.LANGUAGES else "English"
         self.current_language = self.q_settings.value("current_language", default_lang)
         self.current_max_words = 120
+
+        # Ctrl+C: whether multiple captured frames are tiled into 3x3 grid images (fewer,
+        # denser requests) or sent one image per frame as the app always used to. On by
+        # default; remembered between runs like the model and language.
+        self.grid_frames_enabled = self.q_settings.value("grid_frames_enabled", True, type=bool)
         
         self.tts = QTextToSpeech(self)
         self.available_voices = [v.name() for v in self.tts.availableVoices()]
@@ -242,6 +247,8 @@ class VideoPlayerWidget(QWidget):
             "Ask Voice Question (Ctrl+Shift+A)": self.transcription_manager.start_voice_query,
             "Ask Text Question (Ctrl+A)": self.vision_manager.show_custom_prompt_dialog,
             "Repeat Last Output (Ctrl+R)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier)),
+            "Toggle Frame Grid Batching (Ctrl+C)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)),
+            "Announce Last Call Token Usage (Ctrl+P)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_P, Qt.KeyboardModifier.ControlModifier)),
             "Open Help Manual (Ctrl+H)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_H, Qt.KeyboardModifier.ControlModifier))
         }
 
@@ -503,6 +510,27 @@ class VideoPlayerWidget(QWidget):
                 if was_playing: self.player.play()
             elif key == Qt.Key.Key_I:
                 self.speak(f"Background Progress: {self.current_background_task}")
+            elif key == Qt.Key.Key_C:
+                self.grid_frames_enabled = not self.grid_frames_enabled
+                self.q_settings.setValue("grid_frames_enabled", self.grid_frames_enabled)
+                if self.grid_frames_enabled:
+                    self.speak("Frame grid batching enabled. Multiple frames are tiled into 3x3 grid images.")
+                else:
+                    self.speak("Frame grid batching disabled. Frames are sent one image at a time.")
+            elif key == Qt.Key.Key_P:
+                info = self.api_client.last_call_info
+                usage = info.get("usage") if info else None
+                if not usage:
+                    self.speak("No token usage information is available for the last call.")
+                else:
+                    prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+                    completion_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0))
+                    msg = f"Last call used {prompt_tokens} input tokens and {completion_tokens} output tokens."
+                    if info.get("provider_id") == "grok":
+                        ticks = usage.get("cost_in_usd_ticks")
+                        if ticks is not None:
+                            msg += f" Cost: {ticks / 100_000_000:.4f} cents."
+                    self.speak(msg)
             elif key == Qt.Key.Key_Left:
                 self.player.setPosition(max(0, self.player.position() - 6 * SEEK_MS))
             elif key == Qt.Key.Key_Right:

@@ -11,6 +11,10 @@ class MultiClient:
     def __init__(self, api_keys_dict: dict):
         self.keys = api_keys_dict
         self.status_cb = None  # optional callable(str) used by local models to report progress
+        # {"usage": <the response's usage dict>, "provider_id": str, "model_name": str} for
+        # whichever request most recently got a real reply, read back by Ctrl+P. None until
+        # the first call completes, or after a local-model call (those report no token usage).
+        self.last_call_info = None
         self.session = requests.Session()
         retries = Retry(
             total=3, 
@@ -26,6 +30,7 @@ class MultiClient:
         url = model_dict.get("endpoint")
 
         if provider == "local":
+            self.last_call_info = None
             return self._send_local(model_dict, frames_b64, system_prompt, user_text_blocks, history, language, stream_cb)
 
 
@@ -62,7 +67,13 @@ class MultiClient:
         try:
             resp = self.session.post(url, headers=headers, json=payload, timeout=300)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            self.last_call_info = {
+                "usage": data.get("usage") or {},
+                "provider_id": provider,
+                "model_name": model_dict.get("model_name"),
+            }
+            return data
         except requests.exceptions.HTTPError as e:
             # resp is normally set by the line above, but requests can raise HTTPError from
             # the post itself; reading resp.status_code then would be a NameError, replacing

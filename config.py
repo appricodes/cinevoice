@@ -14,22 +14,14 @@ MODELS = [
        }
     },
     {
-       "model_name": "Grok 4.6",
+       "model_name": "Grok 4.7",
        "provider_name": "xAI",
-       "model_id": "grok-4.6",
+       "model_id": "grok-4.7",
        "provider_id": "grok",
        "endpoint": "https://api.x.ai/v1/chat/completions",
        "parameters": {
           "reasoning_effort": "low"
        }
-    },
-    {
-       "model_name": "Gemini 2.5 Flash Lite",
-       "provider_name": "Google",
-       "model_id": "gemini-2.5-flash-lite",
-       "provider_id": "gemini",
-       "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-       "parameters": {}
     },
     {
        "model_name": "Gemini 3.1 Flash Lite",
@@ -40,20 +32,14 @@ MODELS = [
        "parameters": {}
     },
     {
-       "model_name": "GPT-4o Mini",
+       "model_name": "gpt 6 luna",
        "provider_name": "OpenAI",
-       "model_id": "gpt-4o-mini",
+       "model_id": "gpt-6-luna",
        "provider_id": "openai",
        "endpoint": "https://api.openai.com/v1/chat/completions",
-       "parameters": {}
-    },
-    {
-       "model_name": "GPT-5 Nano",
-       "provider_name": "OpenAI",
-       "model_id": "gpt-5-nano",
-       "provider_id": "openai",
-       "endpoint": "https://api.openai.com/v1/chat/completions",
-       "parameters": {}
+       "parameters": {
+          "reasoning_effort": "none"
+       }
     },
     {
        # No "reasoning_effort" on any Mistral entry: the API rejects the field outright on
@@ -232,6 +218,13 @@ def get_local_models_dir() -> str:
 
 SEEK_MS = 10_000
 MAX_IMAGE_DIM = 448
+# xAI's Grok vision models tile images at 448x448; sending anything larger just burns extra
+# image tokens for no added detail, so images sent to a Grok model are downscaled to this
+# cap right before the request, on top of whatever size they already are (including a
+# composed frame grid, which can otherwise be much bigger than a single frame).
+XAI_MAX_IMAGE_DIM = 448
+# How many captured frames are tiled into one image when frame-grid batching (Ctrl+C) is on.
+FRAME_GRID_SIZE = 3
 SETTINGS_FILE = "settings.json"
 # Intentionally left as the app's old name: changing this string would make the OS
 # credential manager treat it as a different app, orphaning everyone's already-saved

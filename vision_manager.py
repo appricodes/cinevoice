@@ -10,8 +10,8 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import QDialog
 from PySide6.QtMultimedia import QMediaPlayer
 
-from config import MAX_IMAGE_DIM, MP4_METADATA_EXTS
-from utils import clean_string, encode_and_resize_frame
+from config import MAX_IMAGE_DIM, XAI_MAX_IMAGE_DIM, FRAME_GRID_SIZE, MP4_METADATA_EXTS
+from utils import clean_string, resize_to_max_dim, encode_frame, build_frame_grids
 from ui_components import ExistingDescriptionDialog
 import mp4_metadata
 
@@ -99,6 +99,46 @@ class VisionManager(QObject):
 
     def _is_local_model(self) -> bool:
         return self.mw.current_model_dict.get("provider_id") == "local"
+
+    def _is_xai_model(self) -> bool:
+        return self.mw.current_model_dict.get("provider_id") == "grok"
+
+    def _prepare_frames_for_api(self, raw_frames: list) -> tuple:
+        """
+        Turns freshly captured OpenCV frames into the final base64 JPEG images to send.
+
+        When more than one frame is captured and frame-grid batching (Ctrl+C) is on, frames
+        are tiled into as few images as possible -- up to FRAME_GRID_SIZE^2 per image, e.g. 90
+        frames as 10 images of a 3x3 grid each -- instead of one image per frame. Off, or with
+        a single frame, each frame is sent as its own image exactly as before.
+
+        A Grok model additionally gets every outgoing image (grid or not) downscaled to
+        XAI_MAX_IMAGE_DIM, since that's the tile size its vision encoder uses internally.
+
+        Returns (frames_b64, grid_note): grid_note explains the tiling to the model and
+        should be appended to the system prompt, or is "" when no grid was used.
+        """
+        thumbnails = [resize_to_max_dim(f, MAX_IMAGE_DIM) for f in raw_frames]
+
+        grid_note = ""
+        if len(thumbnails) > 1 and self.mw.grid_frames_enabled:
+            cells_per_image = FRAME_GRID_SIZE * FRAME_GRID_SIZE
+            images = build_frame_grids(thumbnails, cells_per_image)
+            grid_note = (
+                f"Note on image format: the {len(thumbnails)} video frames (oldest first) were combined "
+                f"into {len(images)} image(s) instead of sending one image per frame. Each image tiles up "
+                f"to {cells_per_image} frames in a {FRAME_GRID_SIZE}x{FRAME_GRID_SIZE} grid, read left to "
+                f"right, then top to bottom, oldest frame first; any unused cells at the end of the last "
+                f"image are blank. Treat every tile as one consecutive moment in time, not a separate picture."
+            )
+        else:
+            images = thumbnails
+
+        if self._is_xai_model():
+            images = [resize_to_max_dim(img, XAI_MAX_IMAGE_DIM) for img in images]
+
+        frames_b64 = [encode_frame(img, quality=90) for img in images]
+        return frames_b64, grid_note
 
     def _uses_embedded_metadata(self) -> bool:
         """Whether the current video's container can hold our descriptions directly."""
@@ -270,24 +310,28 @@ class VisionManager(QObject):
                 capture_times_ms.sort()
             
             cap = cv2.VideoCapture(self.mw.media_path)
-            captured_frames_b64 = []
+            raw_frames = []
             try:
                 for ms_time in capture_times_ms:
                     cap.set(cv2.CAP_PROP_POS_MSEC, float(ms_time))
                     ok, frame = cap.read()
                     if ok and frame is not None:
-                        captured_frames_b64.append(encode_and_resize_frame(frame, MAX_IMAGE_DIM, quality=90))
+                        raw_frames.append(frame)
             finally:
                 cap.release()
-            
+
+            captured_frames_b64, grid_note = self._prepare_frames_for_api(raw_frames)
+
             final_user_prompt = prompt_text
 
             system_prompt_string = self._build_system_prompt(
                 is_question=bool(prompt_data.get('is_question')),
-                frame_count=len(captured_frames_b64),
+                frame_count=len(raw_frames),
                 max_words=max_words,
             )
-            
+            if grid_note:
+                system_prompt_string += " " + grid_note
+
             with self._history_lock:
                 # Snapshot before appending: the current question is sent on its own below,
                 # as the real user message carrying the frames, so leaving it in the history
@@ -457,7 +501,7 @@ class VisionManager(QObject):
         import cv2
         start_ms = block_idx * 30000
         self.mw.updateStatus.emit(f"Extracting frames for 30s block {block_idx}...")
-        frames_b64 = []
+        raw_frames = []
         cap = cv2.VideoCapture(media_path)
         if not cap.isOpened():
             return f"Error: Cannot open video file {os.path.basename(media_path)}"
@@ -466,13 +510,14 @@ class VisionManager(QObject):
                 cap.set(cv2.CAP_PROP_POS_MSEC, float(start_ms + (i * 10000)))
                 ok, frame = cap.read()
                 if ok and frame is not None:
-                    frames_b64.append(encode_and_resize_frame(frame, MAX_IMAGE_DIM))
+                    raw_frames.append(frame)
                 else:
                     break
         finally:
             cap.release()
-        
-        if not frames_b64: return "Error: No frames extracted."
+
+        if not raw_frames: return "Error: No frames extracted."
+        frames_b64, grid_note = self._prepare_frames_for_api(raw_frames)
 
         prev_descs = self._recent_block_descriptions(block_idx)
 
@@ -494,7 +539,7 @@ class VisionManager(QObject):
         else:
             system_prompt = (
                 f"You are giving live audio description of a video to a blind listener, in {self.mw.current_language}. "
-                f"These {len(frames_b64)} frames are the next 30 seconds, in chronological order. "
+                f"These {len(raw_frames)} frames are the next 30 seconds, in chronological order. "
                 f"Limit to {self.mw.current_max_words} words. "
                 f"CRITICAL INSTRUCTIONS: "
                 f"1. Report only what is NEW in these 30 seconds: what happens, what changes, anyone or anywhere not introduced yet, and any text that appears on screen. "
@@ -510,7 +555,9 @@ class VisionManager(QObject):
                 already = "\n\n".join(prev_descs)
                 user_text += (f"\n\nALREADY DESCRIBED TO THE LISTENER, oldest first -- none of this may be repeated:\n"
                               f"\"\"\"\n{already}\n\"\"\"")
-        
+        if grid_note:
+            system_prompt += " " + grid_note
+
         try:
             self.mw.updateStatus.emit(f"Sending block {block_idx} to API...")
             response = self.mw.api_client.send(
@@ -677,30 +724,31 @@ class VisionManager(QObject):
                 self.mw.updateStatus.emit("Error: Unknown video duration.")
                 return
 
-            interval_ms = max(3000.0, dur_ms / 100.0)
+            interval_ms = max(1000.0, dur_ms / 200.0)
             self.mw.updateStatus.emit(f"Extracting up to 100 frames at ~{interval_ms/1000:.1f}s intervals...")
-            frames_b64 = []
+            raw_frames = []
             i = 0
-            while len(frames_b64) < 100:
+            while len(raw_frames) < 100:
                 pos_ms = float(i * interval_ms)
                 if pos_ms >= dur_ms:
                     break
                 cap.set(cv2.CAP_PROP_POS_MSEC, pos_ms)
                 ok, frame = cap.read()
                 if ok and frame is not None:
-                    frames_b64.append(encode_and_resize_frame(frame, MAX_IMAGE_DIM))
+                    raw_frames.append(frame)
                 else:
                     break
                 i += 1
             cap.release()
 
-            if not frames_b64:
+            if not raw_frames:
                 self.mw.updateStatus.emit("Error: No frames extracted.")
                 return
+            frames_b64, grid_note = self._prepare_frames_for_api(raw_frames)
 
             if self._is_local_model():
                 system_prompt = (
-                    f"Narrate these {len(frames_b64)} frames as one story. "
+                    f"Narrate these {len(raw_frames)} frames as one story. "
                     f"Under {self.mw.current_max_words} words. Do not say 'image' or 'frame'. "
                     f"Tone: {self.mw.current_mode}."
                 )
@@ -709,7 +757,7 @@ class VisionManager(QObject):
                 system_prompt = (
                     f"You are a professional cinematic audio describer. Respond in {self.mw.current_language}. "
                     f"Limit the story to exactly {self.mw.current_max_words} words. "
-                    f"I am providing you with {len(frames_b64)} visual frames extracted every {interval_ms/1000:.1f} seconds, spanning the entire video. "
+                    f"I am providing you with {len(raw_frames)} visual frames extracted every {interval_ms/1000:.1f} seconds, spanning the entire video. "
                     f"Translate these sequential visual moments into a seamless, continuous, real-time story. "
                     f"CRITICAL INSTRUCTIONS: "
                     f"1. Never use words like 'image', 'frame', or 'shows'. Treat the input as a living world. "
@@ -718,6 +766,8 @@ class VisionManager(QObject):
                     f"4. Word all of this in a '{self.mw.current_mode}' tone. The tone changes how it is worded, never which events get told."
                 )
                 user_text = "Watch the entire sequence and narrate the unfolding events fluidly from beginning to end."
+            if grid_note:
+                system_prompt += " " + grid_note
             self.mw.updateStatus.emit("Sending frames to API...")
             response = self.mw.api_client.send(
                 model_dict=self.mw.current_model_dict,
