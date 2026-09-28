@@ -59,6 +59,8 @@ class VisionManager(QObject):
         self._prompt_was_playing = False
         self.mw.custom_prompt_panel.accepted.connect(self._on_custom_prompt_accepted)
         self.mw.custom_prompt_panel.cancelled.connect(self._on_custom_prompt_cancelled)
+        self._story_was_playing = False
+        self.mw.story_panel.closed.connect(self._on_story_panel_closed)
 
         self.grokResponseReady.connect(self.handle_grok_response)
         self.lookaheadBlockReady.connect(self.handle_lookahead_ready)
@@ -670,8 +672,24 @@ class VisionManager(QObject):
     
     @Slot(str)
     def handle_full_story_ready(self, text: str):
+        if text.startswith("Error"):
+            self.mw.speak(text)
+            return
         self.mw.updateStatus.emit("Full video story ready.")
-        self.mw.speak(text)
+        self._show_story(text)
+
+    def _show_story(self, text: str):
+        """Pauses playback and opens the story in the main window's story panel; closing it
+        (Escape) resumes playback if it was playing."""
+        if not self.mw.story_panel.isVisible():
+            self._story_was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            if self._story_was_playing: self.mw.player.pause()
+        self.mw.speak("Video story. Use the arrow keys to read, Escape to close.")
+        self.mw.story_panel.show_text(text)
+
+    def _on_story_panel_closed(self):
+        if self._story_was_playing: self.mw.player.play()
+        self.mw.video_widget.setFocus()
 
     def generate_full_video_story(self, force_regenerate: bool = False):
         """
@@ -696,8 +714,7 @@ class VisionManager(QObject):
                 except Exception:
                     pass
             if cached_text:
-                self.mw.speak("Reading cached story.")
-                self.mw.speak(cached_text)
+                self._show_story(cached_text)
                 return
 
         if self._inflight:
@@ -724,11 +741,13 @@ class VisionManager(QObject):
                 self.mw.updateStatus.emit("Error: Unknown video duration.")
                 return
 
-            interval_ms = max(1000.0, dur_ms / 200.0)
-            self.mw.updateStatus.emit(f"Extracting up to 100 frames at ~{interval_ms/1000:.1f}s intervals...")
+            # Frame-grid batching (Ctrl+C) packs 9 frames per image, so sample more densely.
+            max_frames = 600 if self.mw.grid_frames_enabled else 100
+            interval_ms = max(1000.0, dur_ms / float(max_frames))
+            self.mw.updateStatus.emit(f"Extracting up to {max_frames} frames at ~{interval_ms/1000:.1f}s intervals...")
             raw_frames = []
             i = 0
-            while len(raw_frames) < 100:
+            while len(raw_frames) < max_frames:
                 pos_ms = float(i * interval_ms)
                 if pos_ms >= dur_ms:
                     break

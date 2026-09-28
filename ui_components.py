@@ -2,10 +2,10 @@
 from PySide6.QtWidgets import (
     QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QPushButton, QDialogButtonBox, QLineEdit,
-    QTextEdit, QSlider, QMessageBox, QFormLayout, QListWidget
+    QTextEdit, QPlainTextEdit, QSlider, QMessageBox, QFormLayout, QListWidget
 )
 import threading
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QMimeData
 from PySide6 import QtGui
 from config import LOCAL_MODELS
 
@@ -155,6 +155,132 @@ class CustomPromptPanel(QWidget):
             return
         self.setVisible(False)
         self.cancelled.emit()
+
+def soft_wrap(text: str, fits) -> str:
+    """Word-wraps text by turning spaces into newlines, putting as many words on each line
+    as fits(line) allows (a single word too long for a line gets a line to itself). Only
+    spaces are replaced, one for one, so the result has exactly the same length and
+    character positions as the input."""
+    out = list(text)
+    offset = 0
+    for para in text.split("\n"):
+        words = para.split(" ")
+        line = words[0]
+        pos = offset + len(words[0])  # index of the space before the next word
+        for word in words[1:]:
+            candidate = line + " " + word
+            if line and not fits(candidate):
+                out[pos] = "\n"
+                line = word
+            else:
+                line = candidate
+            pos += 1 + len(word)
+        offset += len(para) + 1
+    return "".join(out)
+
+
+class _StoryTextEdit(QPlainTextEdit):
+    """
+    Read-only story text a screen reader can read line by line, like Notepad.
+
+    Qt's Windows accessibility bridge reports a "line" as everything between two newline
+    characters, so with ordinary word wrap NVDA reads a whole paragraph on every Up/Down.
+    Instead, word wrap is off and the text is wrapped here with real newlines to fit the
+    width, re-wrapping on resize. Wrapping only swaps spaces for newlines, so positions in
+    the displayed text equal positions in the original: the caret survives a re-wrap, and
+    copying returns the original text with the spaces back.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._source = ""
+        self._wrap_width = 0
+        self.setReadOnly(True)
+        # Read-only text edits have no keyboard caret by default; this gives one back so the
+        # arrow keys move through the text and Shift+arrows select.
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByKeyboard | Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+
+    def set_source_text(self, text: str):
+        self._source = text
+        self._wrap_width = 0
+        self._rewrap()
+        self.moveCursor(QtGui.QTextCursor.MoveOperation.Start)
+
+    def _rewrap(self):
+        width = self.viewport().width()
+        if width == self._wrap_width:
+            return
+        self._wrap_width = width
+        metrics = self.fontMetrics()
+        max_px = max(200, width - 2 * int(self.document().documentMargin()) - metrics.averageCharWidth())
+        cursor = self.textCursor()
+        anchor, pos = cursor.anchor(), cursor.position()
+        self.setPlainText(soft_wrap(self._source, lambda line: metrics.horizontalAdvance(line) <= max_px))
+        cursor = self.textCursor()
+        cursor.setPosition(anchor)
+        cursor.setPosition(pos, QtGui.QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cursor)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._source:
+            self._rewrap()
+
+    def createMimeDataFromSelection(self):
+        cursor = self.textCursor()
+        mime = QMimeData()
+        mime.setText(self._source[cursor.selectionStart():cursor.selectionEnd()])
+        return mime
+
+    def keyPressEvent(self, event):
+        # Every key is consumed here, so keys the edit itself doesn't use (Space, letters,
+        # F-keys...) don't fall through to the main window and trigger player shortcuts.
+        super().keyPressEvent(event)
+        event.accept()
+
+
+class StoryPanel(QWidget):
+    """
+    Shows the full video story (Shift+F12) as navigable, selectable text instead of only
+    speaking it. Embedded in the main window and hidden until needed, for the same
+    screen-reader reason as CustomPromptPanel. Escape hides it again.
+    """
+    closed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.label = QLabel("Video story:")
+        self.text_edit = _StoryTextEdit(self)
+        self.text_edit.setAccessibleName("Video story")
+        self.text_edit.setAccessibleDescription("Press Escape to close.")
+        self.text_edit.setMinimumHeight(200)
+        self.label.setBuddy(self.text_edit)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.label)
+        layout.addWidget(self.text_edit)
+
+        escape_shortcut = QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Escape), self)
+        escape_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        escape_shortcut.activated.connect(self.close_panel)
+
+        self.setVisible(False)
+
+    def show_text(self, text: str):
+        # Shown first so the edit has its real width when the text is wrapped to it.
+        self.setVisible(True)
+        self.text_edit.set_source_text(text.strip())
+        self.text_edit.setFocus()
+
+    def close_panel(self):
+        if not self.isVisible():
+            return
+        self.setVisible(False)
+        self.closed.emit()
+
 
 class ApiKeyDialog(QDialog):
     """One password-masked field per provider; a saved key shows as "********" instead of its value."""

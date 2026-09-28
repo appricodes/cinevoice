@@ -16,8 +16,9 @@ from PySide6.QtTextToSpeech import QTextToSpeech
 import settings
 from config import SEEK_MS, MODELS, MEDIA_EXTS, MEDIA_FILE_DIALOG_FILTER
 from utils import clean_string
+from audio_boost import VolumeBooster
 from api_client import MultiClient
-from ui_components import ClickableSlider, SettingsDialog, LastOutputDialog, CommandMenuDialog, ModelMenuDialog, ApiKeyDialog, DownloadProgressDialog, CustomPromptPanel
+from ui_components import ClickableSlider, SettingsDialog, LastOutputDialog, CommandMenuDialog, ModelMenuDialog, ApiKeyDialog, DownloadProgressDialog, CustomPromptPanel, StoryPanel
 
 from transcription_manager import TranscriptionManager
 from vision_manager import VisionManager
@@ -110,13 +111,16 @@ class VideoPlayerWidget(QWidget):
         # docstring for why (it's about screen readers re-announcing the main window's title).
         self.custom_prompt_panel = CustomPromptPanel(self)
         self.main_layout.addWidget(self.custom_prompt_panel, 0)
+        self.story_panel = StoryPanel(self)
+        self.main_layout.addWidget(self.story_panel, 0)
 
         self.setLayout(self.main_layout)
         
         self.audio_output = QAudioOutput(self)
         self.player = QMediaPlayer(self)
-        self.audio_output.setVolume(0.5)
         self.player.setAudioOutput(self.audio_output)
+        # Starts at 100%; Up/Down move it between 0% and 200%.
+        self.volume_booster = VolumeBooster(self.player, self.audio_output, self)
         self.player.setVideoOutput(self.video_widget)
         
         self.player.positionChanged.connect(self.on_position_changed)
@@ -337,7 +341,10 @@ class VideoPlayerWidget(QWidget):
         text = clean_string(text)
         self.last_spoken_text = text
         
-        if not self.video_widget.hasFocus():
+        # Leave focus alone while the story is being read, or the caret would be yanked out of it.
+        focused = self.focusWidget()
+        reading_story = focused is not None and self.story_panel.isAncestorOf(focused)
+        if not self.video_widget.hasFocus() and not reading_story:
             self.video_widget.setFocus()
             
         if not QtGui.QAccessible.isActive():
@@ -561,13 +568,11 @@ class VideoPlayerWidget(QWidget):
                 cur = self.player.position()
                 self.player.setPosition(int(min(dur, cur + SEEK_MS) if dur > 0 else cur + SEEK_MS))
             elif key == Qt.Key.Key_Up:
-                new_vol = min(2.0, self.audio_output.volume() + 0.05)
-                self.audio_output.setVolume(new_vol)
-                self.speak(f"Volume {int(new_vol * 100)} percent")
+                new_vol = self.volume_booster.set_volume(self.volume_booster.volume() + 0.05)
+                self.speak(f"Volume {round(new_vol * 100)} percent")
             elif key == Qt.Key.Key_Down:
-                new_vol = max(0.0, self.audio_output.volume() - 0.05)
-                self.audio_output.setVolume(new_vol)
-                self.speak(f"Volume {int(new_vol * 100)} percent")
+                new_vol = self.volume_booster.set_volume(self.volume_booster.volume() - 0.05)
+                self.speak(f"Volume {round(new_vol * 100)} percent")
             elif Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
                 pct_map = {Qt.Key.Key_1: 0.0, Qt.Key.Key_2: 0.1, Qt.Key.Key_3: 0.2, Qt.Key.Key_4: 0.3, Qt.Key.Key_5: 0.4,
                            Qt.Key.Key_6: 0.5, Qt.Key.Key_7: 0.6, Qt.Key.Key_8: 0.7, Qt.Key.Key_9: 0.8, Qt.Key.Key_0: 0.9}
