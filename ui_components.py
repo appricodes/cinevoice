@@ -243,11 +243,15 @@ class _StoryTextEdit(QPlainTextEdit):
 
 class StoryPanel(QWidget):
     """
-    Shows the full video story (Shift+F12) as navigable, selectable text instead of only
-    speaking it. Embedded in the main window and hidden until needed, for the same
+    Shows the full video story (Shift+F12), or the character list (Ctrl+W), as navigable,
+    selectable text instead of only speaking it. Embedded in the main window and hidden until needed, for the same
     screen-reader reason as CustomPromptPanel. Escape hides it again.
+
+    For the character list it also shows an on/off button, after the text in Tab order,
+    for whether the list is sent to the model with every request.
     """
     closed = Signal()
+    castToggled = Signal(bool)  # only from the user pressing the button, never from show_text
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -256,12 +260,22 @@ class StoryPanel(QWidget):
         self.text_edit.setAccessibleName("Video story")
         self.text_edit.setAccessibleDescription("Press Escape to close.")
         self.text_edit.setMinimumHeight(200)
+        self.text_edit.setTabChangesFocus(True)
         self.label.setBuddy(self.text_edit)
+
+        self.cast_toggle = QPushButton(self)
+        self.cast_toggle.setCheckable(True)
+        # Not a QDialog, so Enter only presses the button with this set (see CustomPromptPanel).
+        self.cast_toggle.setAutoDefault(True)
+        self.cast_toggle.setVisible(False)
+        self.cast_toggle.toggled.connect(self._update_cast_toggle_text)
+        self.cast_toggle.clicked.connect(lambda: self.castToggled.emit(self.cast_toggle.isChecked()))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.label)
         layout.addWidget(self.text_edit)
+        layout.addWidget(self.cast_toggle)
 
         escape_shortcut = QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Escape), self)
         escape_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -269,7 +283,17 @@ class StoryPanel(QWidget):
 
         self.setVisible(False)
 
-    def show_text(self, text: str):
+    def _update_cast_toggle_text(self, on: bool):
+        self.cast_toggle.setText(f"Send character list with every request: {'On' if on else 'Off'}")
+
+    def show_text(self, text: str, title: str = "Video story", cast_enabled: bool | None = None):
+        """cast_enabled shows the character list's on/off button in that state; None hides it."""
+        self.label.setText(f"{title}:")
+        self.text_edit.setAccessibleName(title)
+        self.cast_toggle.setVisible(cast_enabled is not None)
+        if cast_enabled is not None:
+            self.cast_toggle.setChecked(cast_enabled)
+            self._update_cast_toggle_text(cast_enabled)
         # Shown first so the edit has its real width when the text is wrapped to it.
         self.setVisible(True)
         self.text_edit.set_source_text(text.strip())
@@ -416,6 +440,53 @@ class LastOutputDialog(QDialog):
         
     def copy_text(self):
         QApplication.clipboard().setText(self.text_edit.toPlainText())
+
+class CustomInstructionDialog(QDialog):
+    """
+    Edits the standing instruction (Ctrl+F12) that is added to every system prompt, e.g.
+    "talk more about wooden furniture than metal" or "challenge the viewer". OK turns it on
+    with the typed text (empty text turns it off); the Disable button, shown only while it
+    is on, turns it off and keeps the text for next time.
+    """
+    DISABLED = 2  # exec() result for the Disable button, alongside Accepted/Rejected
+
+    def __init__(self, text, enabled, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Custom Instruction")
+        self.setMinimumSize(500, 300)
+        layout = QVBoxLayout(self)
+
+        status = "currently on" if enabled else "currently off"
+        self.label = QLabel(f"Instruction added to every request ({status}). Ctrl+Enter or OK turns it on:")
+        self.text_edit = QPlainTextEdit(self)
+        self.text_edit.setPlainText(text)
+        # Tab leaves the box instead of typing a tab character, so the buttons stay reachable.
+        self.text_edit.setTabChangesFocus(True)
+        self.text_edit.setAccessibleName("Custom instruction")
+        self.label.setBuddy(self.text_edit)
+        layout.addWidget(self.label)
+        layout.addWidget(self.text_edit)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.disable_btn = self.buttons.addButton("Disable", QDialogButtonBox.ButtonRole.ActionRole)
+        self.disable_btn.setVisible(enabled)
+        layout.addWidget(self.buttons)
+        self.setLayout(layout)
+
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.disable_btn.clicked.connect(lambda: self.done(CustomInstructionDialog.DISABLED))
+
+        # Plain Enter adds a new line in the box, so Ctrl+Enter is the keyboard way to confirm.
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            QtGui.QShortcut(QtGui.QKeySequence(Qt.KeyboardModifier.ControlModifier | key), self, self.accept)
+
+        self.text_edit.setFocus()
+        self.text_edit.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+
+    def get_text(self):
+        return self.text_edit.toPlainText().strip()
+
 
 class ActivationDialog(QDialog):
     """

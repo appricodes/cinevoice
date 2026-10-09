@@ -4,7 +4,7 @@ import sys
 
 MODELS = [
 {
-       "model_name": "Grok 4.3 - no reasoning",
+       "model_name": "Grok 4.3",
        "provider_name": "xAI",
        "model_id": "grok-4.3",
        "provider_id": "grok",
@@ -225,6 +225,22 @@ MAX_IMAGE_DIM = 448
 XAI_MAX_IMAGE_DIM = 448
 # How many captured frames are tiled into one image when frame-grid batching (Ctrl+C) is on.
 FRAME_GRID_SIZE = 3
+# Frames sampled from each 30-second block for continuous narration (Ctrl+D) and batch
+# pre-generation (Ctrl+Shift+D), evenly spaced; always tiled into grids, so 18 frames are sent
+# as two 3x3 grid images.
+BLOCK_FRAME_COUNT = 18
+# Character list (Ctrl+W): frames sampled evenly across the whole video, each sent as its own
+# image (never tiled into a grid) and larger than usual, since telling faces apart needs detail.
+CAST_FRAME_COUNT = 32
+CAST_IMAGE_DIM = 768
+# Picture exploration (mouse click or Ctrl+Q): the paused frame is described as a grid of
+# cells, read aloud as the mouse enters each one. Ctrl+Shift+Q cycles through these sizes,
+# as (columns, rows) -- wider than tall, like the pictures themselves; GRID_EXPLORE_DEFAULT
+# indexes the one used until the user picks another. Sent larger than a normal description
+# frame, since every cell needs its own detail.
+GRID_EXPLORE_SIZES = [(4, 3), (8, 6), (12, 9)]
+GRID_EXPLORE_DEFAULT = 1
+GRID_EXPLORE_IMAGE_DIM = 1024
 SETTINGS_FILE = "settings.json"
 # Intentionally left as the app's old name: changing this string would make the OS
 # credential manager treat it as a different app, orphaning everyone's already-saved

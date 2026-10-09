@@ -6,6 +6,14 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# Appended to every system prompt while Persian is selected. Persian usually leaves the ezafe
+# unwritten, so eSpeak/Piper read "کتاب قرمز" without its linking "-e"; asking the model to
+# write the kasra makes the spoken description sound natural.
+PERSIAN_EZAFE_INSTRUCTION = (
+    "لطفاً در تمام متن فارسی که تولید می‌کنی، کسره‌ی اضافه (ـِ) را برای کلمات متصل‌شونده بگذار. "
+    "مثال درست: کتابِ قرمز، خانه‌ی بزرگ، دوستِ من، ماشینِ سفید"
+)
+
 class MultiClient:
     """One client for every online provider, since they all share the OpenAI chat/completions shape."""
     def __init__(self, api_keys_dict: dict):
@@ -15,9 +23,18 @@ class MultiClient:
         # whichever request most recently got a real reply, read back by Ctrl+P. None until
         # the first call completes, or after a local-model call (those report no token usage).
         self.last_call_info = None
+        # Ctrl+E: replaces the model's configured "reasoning_effort" for this video. Only
+        # applied to models whose config already sets one, since some providers (Mistral)
+        # reject the field outright. None means use the value from config.py.
+        self.reasoning_effort_override = None
         self.session = requests.Session()
+        # read=False: once a request has reached the server, a failure while waiting for the
+        # reply (above all the 300-second timeout below) is reported rather than retried.
+        # Retrying it re-sent the whole request and waited all over again, up to four times,
+        # so a slow reply could leave the app silent for twenty minutes before any error.
         retries = Retry(
-            total=3, 
+            total=3,
+            read=False,
             backoff_factor=0.6,
             status_forcelist=(408, 429, 500, 502, 503, 504),
             allowed_methods=frozenset(['POST'])
@@ -28,6 +45,9 @@ class MultiClient:
         provider = model_dict.get("provider_id")
         model = model_dict.get("model_id")
         url = model_dict.get("endpoint")
+
+        if language == "Persian":
+            system_prompt = f"{system_prompt} {PERSIAN_EZAFE_INSTRUCTION}"
 
         if provider == "local":
             self.last_call_info = None
@@ -54,7 +74,9 @@ class MultiClient:
         
         parameters = model_dict.get("parameters", {})
         payload.update(parameters)
-            
+        if self.reasoning_effort_override and "reasoning_effort" in parameters:
+            payload["reasoning_effort"] = self.reasoning_effort_override
+
         if expect_json:
             payload["response_format"] = {"type": "json_object"}
             
@@ -81,6 +103,8 @@ class MultiClient:
             if resp is None:
                 return {"error": f"API Error ({provider}): {e}"}
             return {"error": f"API Error ({provider}): Status {resp.status_code}. {resp.text}"}
+        except requests.exceptions.Timeout:
+            return {"error": f"{model_dict.get('provider_name')} did not answer within 5 minutes."}
         except Exception as e:
             return {"error": f"Network Error: {str(e)}"}
 

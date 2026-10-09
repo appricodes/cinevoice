@@ -18,10 +18,11 @@ from config import SEEK_MS, MODELS, MEDIA_EXTS, MEDIA_FILE_DIALOG_FILTER
 from utils import clean_string
 from audio_boost import VolumeBooster
 from api_client import MultiClient
-from ui_components import ClickableSlider, SettingsDialog, LastOutputDialog, CommandMenuDialog, ModelMenuDialog, ApiKeyDialog, DownloadProgressDialog, CustomPromptPanel, StoryPanel
+from ui_components import ClickableSlider, SettingsDialog, LastOutputDialog, CommandMenuDialog, ModelMenuDialog, ApiKeyDialog, DownloadProgressDialog, CustomPromptPanel, StoryPanel, CustomInstructionDialog
 
 from transcription_manager import TranscriptionManager
 from vision_manager import VisionManager
+from grid_explorer import GridExplorer
 
 class VideoPlayerWidget(QWidget):
     updateStatus = Signal(str)
@@ -52,6 +53,14 @@ class VideoPlayerWidget(QWidget):
         default_lang = settings.LANGUAGES[0] if settings.LANGUAGES else "English"
         self.current_language = self.q_settings.value("current_language", default_lang)
         self.current_max_words = 120
+
+        # Ctrl+F12: a standing instruction of the user's own, added to every system prompt
+        # while enabled. The text is kept even while disabled, ready to switch back on.
+        self.custom_instruction = self.q_settings.value("custom_instruction", "")
+        self.custom_instruction_enabled = self.q_settings.value("custom_instruction_enabled", False, type=bool)
+        # Whether a video's character list (Ctrl+W) is sent with every request; switched with
+        # the on/off button on the Ctrl+W panel. One setting for all videos.
+        self.cast_enabled = self.q_settings.value("cast_enabled", True, type=bool)
 
         # Ctrl+C: whether multiple captured frames are tiled into 3x3 grid images (fewer,
         # denser requests) or sent one image per frame as the app always used to. On by
@@ -133,7 +142,8 @@ class VideoPlayerWidget(QWidget):
 
         self.transcription_manager = TranscriptionManager(self)
         self.vision_manager = VisionManager(self)
-        
+        self.grid_explorer = GridExplorer(self)
+
         if self.media_path:
             self.load_video(self.media_path)
             
@@ -169,6 +179,8 @@ class VideoPlayerWidget(QWidget):
     def set_current_model(self, model_dict: dict, announce: bool = True):
         self.current_model_dict = model_dict
         self.q_settings.setValue("current_model_id", model_dict["model_id"])
+        # A Ctrl+E choice belongs to the model it was made for; the new one starts from its own default.
+        self.api_client.reasoning_effort_override = None
         if model_dict.get("provider_id") == "local":
             # Slow model: start from a short default description length.
             self.current_max_words = self.local_default_words(model_dict)
@@ -216,7 +228,10 @@ class VideoPlayerWidget(QWidget):
             self.vision_manager._inflight = False
         
         self.transcription_manager.reset_state()
+        self.grid_explorer.stop(resume=False)
         self.vision_manager.lookahead_mode = False
+        # Ctrl+E lasts for one file only: a new file goes back to the default from config.py.
+        self.api_client.reasoning_effort_override = None
         with self.vision_manager._history_lock:
             self.vision_manager.chat_history.clear()
         
@@ -226,6 +241,7 @@ class VideoPlayerWidget(QWidget):
         self.player.setPosition(0)
         
         self.vision_manager.init_lookahead_data()
+        self.vision_manager.load_cast()
 
         self.player.play()
         self.video_widget.setFocus()
@@ -243,15 +259,22 @@ class VideoPlayerWidget(QWidget):
 
         commands_dict = {
             "Open Video (Ctrl+O)": self.open_and_play,
+            "Maximize / Restore Window (Alt+Enter)": self.toggle_maximized,
             "Select AI Model (Ctrl+M)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_M, Qt.KeyboardModifier.ControlModifier)),
             "Settings (Ctrl+S)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)),
             "Continuous Narrate (Ctrl+D)": self.vision_manager.toggle_lookahead_mode,
             "Batch Look-Ahead 30s Blocks (Ctrl+Shift+D)": self.vision_manager.start_batch_lookahead,
             "Full Video Cinematic Story (Shift+F12)": lambda: self.vision_manager.generate_full_video_story(force_regenerate=False),
+            "Character List (Ctrl+W)": self.vision_manager.build_cast,
+            "Rebuild Character List (Ctrl+Shift+W)": lambda: self.vision_manager.build_cast(force_regenerate=True),
             "Ask Voice Question (Ctrl+Shift+A)": self.transcription_manager.start_voice_query,
             "Ask Text Question (Ctrl+A)": self.vision_manager.show_custom_prompt_dialog,
+            "Explore the Picture with the Mouse (Ctrl+Q or click)": self.grid_explorer.start,
+            "Change Picture Grid Size: 4x3, 8x6, 12x9 (Ctrl+Shift+Q)": self.grid_explorer.cycle_size,
+            "Custom Instruction (Ctrl+F12)": self.edit_custom_instruction,
             "Repeat Last Output (Ctrl+R)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier)),
             "Toggle Frame Grid Batching (Ctrl+C)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)),
+            "Cycle Reasoning Effort (Ctrl+E)": self.cycle_reasoning_effort,
             "Announce Last Call Token Usage (Ctrl+P)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_P, Qt.KeyboardModifier.ControlModifier)),
             "Open Help Manual (Ctrl+H)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_H, Qt.KeyboardModifier.ControlModifier))
         }
@@ -265,6 +288,56 @@ class VideoPlayerWidget(QWidget):
         if was_playing: self.player.play()
         self.video_widget.setFocus()
     
+    def edit_custom_instruction(self):
+        was_playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        if was_playing: self.player.pause()
+
+        dialog = CustomInstructionDialog(self.custom_instruction, self.custom_instruction_enabled, self)
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
+            self.custom_instruction = dialog.get_text()
+            self.custom_instruction_enabled = bool(self.custom_instruction)
+            self.q_settings.setValue("custom_instruction", self.custom_instruction)
+            self.speak("Custom instruction enabled." if self.custom_instruction_enabled
+                       else "Custom instruction is empty, so it is disabled.")
+        elif result == CustomInstructionDialog.DISABLED:
+            self.custom_instruction_enabled = False
+            self.speak("Custom instruction disabled.")
+        self.q_settings.setValue("custom_instruction_enabled", self.custom_instruction_enabled)
+
+        if was_playing: self.player.play()
+        self.video_widget.setFocus()
+
+    def toggle_maximized(self):
+        """Alt+Enter: maximizes the window, or puts a maximized (or full screen) one back to normal."""
+        if self.isMaximized() or self.isFullScreen():
+            self.showNormal()
+            self.speak("Window restored.")
+        else:
+            self.showMaximized()
+            self.speak("Window maximized.")
+        self.video_widget.setFocus()
+
+    REASONING_EFFORTS = ("none", "low", "medium")
+
+    def cycle_reasoning_effort(self):
+        """
+        Ctrl+E: steps the current model's reasoning effort through none, low, medium. Only for
+        models whose config sets "reasoning_effort"; the choice lasts until a new file is
+        opened or the model is changed, which both go back to the config default.
+        """
+        parameters = self.current_model_dict.get("parameters", {})
+        if "reasoning_effort" not in parameters:
+            self.speak(f"{self.current_model_dict['model_name']} has no reasoning effort setting.")
+            return
+        current = self.api_client.reasoning_effort_override or parameters["reasoning_effort"]
+        if current in self.REASONING_EFFORTS:
+            new = self.REASONING_EFFORTS[(self.REASONING_EFFORTS.index(current) + 1) % len(self.REASONING_EFFORTS)]
+        else:
+            new = self.REASONING_EFFORTS[0]
+        self.api_client.reasoning_effort_override = new
+        self.speak(f"Reasoning effort {new}.")
+
     def navigate_folder(self, direction: int):
         if not self.media_path:
             self.speak("No video currently open.")
@@ -353,7 +426,7 @@ class VideoPlayerWidget(QWidget):
         else:
             if self.tts.state() == QTextToSpeech.State.Speaking:
                 self.tts.stop()
-        
+
         # Prefer the modern Announcement event (reads text without needing a name change);
         # QAccessibleAnnouncementEvent doesn't exist on older Qt/PySide6 versions, so fall
         # back to setting the accessible name and firing an Alert event, which NVDA also picks up.
@@ -396,6 +469,10 @@ class VideoPlayerWidget(QWidget):
                 self.vision_manager.generate_full_video_story(force_regenerate=True)
             elif key == Qt.Key.Key_D:
                 self.vision_manager.start_batch_lookahead()
+            elif key == Qt.Key.Key_W:
+                self.vision_manager.build_cast(force_regenerate=True)
+            elif key == Qt.Key.Key_Q:
+                self.grid_explorer.cycle_size()
             else:
                 handled = False
         
@@ -432,7 +509,9 @@ class VideoPlayerWidget(QWidget):
                 self.vision_manager.trigger_current_prompt()
             elif key == Qt.Key.Key_Down:
                 self.show_command_menu()
-            elif Qt.Key.Key_F1 <= key <= Qt.Key.Key_F12:
+            elif key == Qt.Key.Key_F12:
+                self.edit_custom_instruction()
+            elif Qt.Key.Key_F1 <= key <= Qt.Key.Key_F11:
                 idx = key - Qt.Key.Key_F1
                 if 0 <= idx < len(settings.MODES):
                     self.current_mode = settings.MODES[idx]
@@ -482,6 +561,8 @@ class VideoPlayerWidget(QWidget):
                 if was_playing: self.player.play()
             elif key == Qt.Key.Key_D:
                 self.vision_manager.toggle_lookahead_mode()
+            elif key == Qt.Key.Key_W:
+                self.vision_manager.build_cast()
             elif key == Qt.Key.Key_F:
                 if not self.vision_manager.is_auto_describing:
                     self.speak("Starting auto-describe.")
@@ -524,6 +605,10 @@ class VideoPlayerWidget(QWidget):
                     self.speak("Frame grid batching enabled. Multiple frames are tiled into 3x3 grid images.")
                 else:
                     self.speak("Frame grid batching disabled. Frames are sent one image at a time.")
+            elif key == Qt.Key.Key_E:
+                self.cycle_reasoning_effort()
+            elif key == Qt.Key.Key_Q:
+                self.grid_explorer.start()
             elif key == Qt.Key.Key_P:
                 info = self.api_client.last_call_info
                 usage = info.get("usage") if info else None
@@ -533,6 +618,17 @@ class VideoPlayerWidget(QWidget):
                     prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
                     completion_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0))
                     msg = f"Last call used {prompt_tokens} input tokens and {completion_tokens} output tokens."
+                    # Providers report cached input tokens under slightly different names;
+                    # only mentioned when the reply includes them and some were cached.
+                    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+                    cached_tokens = details.get("cached_tokens") or usage.get("cached_tokens") or 0
+                    if cached_tokens > 0:
+                        msg += f" {cached_tokens} of the input tokens were cached."
+                    # Same for reasoning (thinking) tokens, which providers count as output.
+                    out_details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+                    reasoning_tokens = out_details.get("reasoning_tokens") or usage.get("reasoning_tokens") or 0
+                    if reasoning_tokens > 0:
+                        msg += f" {reasoning_tokens} reasoning tokens were used."
                     if info.get("provider_id") == "grok":
                         ticks = usage.get("cost_in_usd_ticks")
                         if ticks is not None:
@@ -547,6 +643,9 @@ class VideoPlayerWidget(QWidget):
             else:
                 handled = False
         
+        elif has_alt and not has_ctrl and not has_shift and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.toggle_maximized()
+
         elif has_shift and not has_ctrl and not has_alt:
             if key == Qt.Key.Key_F7:
                 self.vision_manager.assign_custom_prompt(7)
@@ -558,7 +657,9 @@ class VideoPlayerWidget(QWidget):
                 handled = False
         
         elif not has_ctrl and not has_shift and not has_alt:
-            if key == Qt.Key.Key_Home:
+            if key in (Qt.Key.Key_Space, Qt.Key.Key_Escape) and self.grid_explorer.is_engaged():
+                self.grid_explorer.stop()
+            elif key == Qt.Key.Key_Home:
                 self.player.setPosition(0)
                 self.speak("Moved to beginning.")
             elif key == Qt.Key.Key_Left:

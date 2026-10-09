@@ -13,7 +13,7 @@ LANGUAGES = [
     "Spanish", "Spanish (Latin America)", "Swedish", "Thai", "Turkish", "Ukrainian", "Vietnamese"
 ]
 
-# Fully populated 12 modes mapping to Ctrl+F1 through Ctrl+F12
+# 11 modes mapping to Ctrl+F1 through Ctrl+F11 (Ctrl+F12 edits the custom instruction instead)
 MODES = [
     "Neutral Audio Description",   # Ctrl+F1
     "Family Friendly",             # Ctrl+F2
@@ -26,7 +26,6 @@ MODES = [
     "Poetic & Lyrical",            # Ctrl+F9
     "Cinematic & Epic",            # Ctrl+F10
     "Romantic & Emotional",        # Ctrl+F11
-    "Action & Fast-Paced"          # Ctrl+F12
 ]
 
 PROMPTS = [
@@ -69,25 +68,25 @@ PROMPTS = [
     {
         "title": "Cinematic Establishing Shot",
         "prompt": "Set the scene cinematically. Describe the environment, lighting, and atmosphere as a living world. Focus on the spatial layout.", 
-        "frames_count": 1, 
-        "frames_interval": 0.5
+        "frames_count": 9, 
+        "frames_interval": 1.0
     },
     {
         "title": "Character Focus",
         "prompt": "Focus entirely on the people or creatures. Describe their expressions, body language, and immediate actions fluidly in the present tense.", 
-        "frames_count": 3, 
+        "frames_count": 9, 
         "frames_interval": 1.0
     },
     {
         "title": "Fluid Action Narration",
         "prompt": "Narrate what happens across this moment as a short, chronological story, in the order it unfolds. Add a touch of sensory detail -- setting, mood, expression -- so the listener can picture it, but skip trivial motions like a glance or a small gesture shift.",
-        "frames_count": 10,
-        "frames_interval": 0.5
+        "frames_count": 9,
+        "frames_interval": 1.0
     },
     {
         "title": "Cinematic Micro-Story",
         "prompt": "Tell what happens across these moments as a vivid, chronological micro-story, from beginning to end. Include enough sensory and atmospheric detail -- surroundings, mood, who's involved -- to help the listener picture the scene, without dwelling on minor or valueless movements.",
-        "frames_count": 20,
+        "frames_count": 18,
         "frames_interval": 6.0
     }
 ]

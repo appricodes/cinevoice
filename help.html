@@ -45,7 +45,10 @@
             <p>Press any of <kbd>F1</kbd>-<kbd>F6</kbd> or <kbd>F9</kbd>-<kbd>F12</kbd> to instantly ask for one of ten built-in description styles, from a brief one-line description to a full cinematic narration of several frames (see the Preset Prompts table below for exactly what each key does). <kbd>Ctrl+A</kbd> lets you type your own custom question instead, and <kbd>Ctrl+Shift+A</kbd> lets you ask by speaking into your microphone. These two answer the question you actually asked &mdash; ask "what color is the car?" and you get the color, not a description of the scene &mdash; and they remember your last question, frame count and reply length between runs. <kbd>Ctrl+Up Arrow</kbd> repeats whichever prompt you last used.</p>
             <p>You can save your own two favorite custom prompts: type one with <kbd>Ctrl+A</kbd>, then instead of pressing Enter, press <kbd>Shift+F7</kbd> or <kbd>Shift+F8</kbd> to save it to that slot. Afterwards, pressing plain <kbd>F7</kbd> or <kbd>F8</kbd> instantly reruns it. Like <kbd>Ctrl+A</kbd>, a saved prompt is answered on its own terms, so a slot holding a question gets an answer rather than a description.</p>
             <p>For continuous narration, <kbd>Ctrl+D</kbd> describes the video automatically in 30-second chunks as you watch, in the manner of audio description: each chunk covers the thirty seconds about to play and reports only what is new, so a person, place or object already introduced is not described to you again. <kbd>Ctrl+F</kbd> toggles an auto-describe mode that re-describes the changing scene every 5 seconds. <kbd>Ctrl+Shift+D</kbd> pre-generates narration for the entire video in the background so playback never has to pause and wait; if this video already has saved block descriptions, a dialog first asks whether to regenerate everything from scratch, use what's already saved (which just turns on the same continuous narration as <kbd>Ctrl+D</kbd>), or cancel. <kbd>Shift+F12</kbd> generates one single story covering the whole video from start to finish (and <kbd>Ctrl+Shift+F12</kbd> regenerates it if you already have one cached).</p>
-            <p>Use <kbd>Ctrl+F1</kbd> through <kbd>Ctrl+F12</kbd> to choose the narration style (see the Narration Styles table below), and <kbd>Ctrl+Page Up/Page Down</kbd> to make descriptions longer or shorter. Your chosen style is remembered, so the next time you open Cinevoice it is still the one in use. The style colors the wording of everything the app says &mdash; descriptions, continuous narration and the answers to your questions alike &mdash; without changing what gets reported.</p>
+            <p>To explore a picture by touch, click anywhere on the video or press <kbd>Ctrl+Q</kbd>. The video pauses, the window goes full screen so the picture is as large as possible, and the current picture is sent to the AI, which describes it as a grid of areas: what is in each area and right around it. <kbd>Ctrl+Shift+Q</kbd> switches the grid between 4 by 3, 8 by 6 and 12 by 9 areas (columns by rows); a finer grid gives more detail but takes the AI longer to describe. The size you choose is remembered between runs. When it is ready, it first reads a description of the whole scene, the same kind <kbd>F2</kbd> gives (moving the mouse cuts it short); then move the mouse over the picture and each area is read aloud as the pointer enters it, cutting off the one before so what you hear always matches where the pointer is, and you can feel out where things are, for example a face at the top left and a cup lower down on the right. With a screen reader, each area is a separate object that the screen reader reads through its own mouse tracking, which must be on (in NVDA, <kbd>NVDA+M</kbd> switches it); without one, the app reads the areas itself and moving off the picture says "Outside the picture". Click again, or press <kbd>Spacebar</kbd> or <kbd>Escape</kbd>, to stop exploring, return the window to its previous size and resume playback (doing so while the picture is still being analysed cancels it).</p>
+            <p>Use <kbd>Ctrl+F1</kbd> through <kbd>Ctrl+F11</kbd> to choose the narration style (see the Narration Styles table below), and <kbd>Ctrl+Page Up/Page Down</kbd> to make descriptions longer or shorter. Your chosen style is remembered, so the next time you open Cinevoice it is still the one in use. The style colors the wording of everything the app says &mdash; descriptions, continuous narration and the answers to your questions alike &mdash; without changing what gets reported.</p>
+            <p><kbd>Ctrl+W</kbd> builds a character list for the open video, so descriptions call people by name. It sends 32 frames spread across the whole video to the AI, which finds everyone in them, describes each person in detail (sex, age, skin tone, hair, face, build and body proportions, and marks such as tattoos, earrings or glasses) and gives each one a name. The same person seen in different outfits keeps the same name, with one line in the list per outfit. The list opens in a text box you can read with the arrow keys (<kbd>Escape</kbd> closes it) and is saved with the video, inside the file itself for MP4 and MOV, so pressing <kbd>Ctrl+W</kbd> again later just shows it. <kbd>Ctrl+Shift+W</kbd> builds it again from scratch. While a video has a character list, it is sent with every request, and the AI calls the people it sees by the name of the closest match on the list. Below the list, press <kbd>Tab</kbd> to reach an on/off button (<kbd>Space</kbd> or <kbd>Enter</kbd> switches it) that controls whether the list is sent; it is one setting for all videos and is remembered between runs. Building the list needs an online model; offline models still use a list that already exists. The AI matches people by their looks, so it can occasionally mix up two similar-looking people.</p>
+            <p><kbd>Ctrl+F12</kbd> opens a box where you can type your own standing instruction for the AI, for example &ldquo;talk more about wooden furniture than metal objects&rdquo; or &ldquo;challenge me with a question about what you see&rdquo;. Press OK (or <kbd>Ctrl+Enter</kbd>) to turn it on; from then on it is added to every request &mdash; descriptions, continuous narration, the full video story and your questions. The text is remembered between runs. While it is on, the same box also has a Disable button that turns it off again while keeping the text for next time; clearing the text and pressing OK turns it off too. Descriptions that were already generated and saved are not changed by it.</p>
 
             <h3>5. Offline AI Models (No Internet or API Key Needed)</h3>
             <p>The player can also describe scenes completely offline using AI models that run on your own computer. Press <kbd>Ctrl+S</kbd> to open Settings; the "Offline AI Model" list is the first thing in that dialog. Choose a model and activate the button below it to download it; download progress is announced every one percent and shown in the window title, and you can cancel and resume it later. Models are between about 1.9 and 5.5 gigabytes; smaller models are faster, larger models describe better. The "Uncensored" variants are less restrictive about what they will describe.</p>
@@ -72,6 +75,7 @@
                     <tr><td>Jump to a Tenth of the Video (0% to 90%)</td><td><kbd>0</kbd> through <kbd>9</kbd></td></tr>
                     <tr><td>Volume Up / Down (5% steps, 0% to 200%, starts at 100%)</td><td><kbd>Up Arrow</kbd> / <kbd>Down Arrow</kbd></td></tr>
                     <tr><td>Previous / Next Video File in Folder</td><td><kbd>Page Up</kbd> / <kbd>Page Down</kbd></td></tr>
+                    <tr><td>Maximize / Restore the Window</td><td><kbd>Alt</kbd> + <kbd>Enter</kbd></td></tr>
                 </tbody>
             </table>
 
@@ -84,6 +88,8 @@
                     <tr><td>Trigger a Preset Description Prompt</td><td><kbd>F1</kbd>-<kbd>F6</kbd>, <kbd>F9</kbd>-<kbd>F12</kbd> (see table below)</td></tr>
                     <tr><td>Type a Custom Prompt / Question</td><td><kbd>Ctrl</kbd> + <kbd>A</kbd></td></tr>
                     <tr><td>Ask a Question by Voice (Microphone)</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>A</kbd></td></tr>
+                    <tr><td>Explore the Picture with the Mouse (pauses the video and goes full screen; move the mouse over the picture to hear each part, a click, <kbd>Spacebar</kbd> or <kbd>Escape</kbd> resumes)</td><td>Click the video, or <kbd>Ctrl</kbd> + <kbd>Q</kbd></td></tr>
+                    <tr><td>Change the Picture Grid Size (4 by 3, 8 by 6, 12 by 9)</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd></td></tr>
                     <tr><td>Repeat the Current Prompt</td><td><kbd>Ctrl</kbd> + <kbd>Up Arrow</kbd></td></tr>
                     <tr><td>Assign Current Custom Prompt to Slot 1 / 2</td><td><kbd>Shift</kbd> + <kbd>F7</kbd> / <kbd>F8</kbd></td></tr>
                     <tr><td>Run Your Saved Custom Prompt Slot 1 / 2</td><td><kbd>F7</kbd> / <kbd>F8</kbd></td></tr>
@@ -92,7 +98,10 @@
                     <tr><td>Background Batch: Pre-Generate Whole Video</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>D</kbd></td></tr>
                     <tr><td>Generate Full Video Cinematic Story (opens in a text box you can read with the arrow keys; <kbd>Escape</kbd> closes it)</td><td><kbd>Shift</kbd> + <kbd>F12</kbd></td></tr>
                     <tr><td>Regenerate Full Video Cinematic Story</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>F12</kbd></td></tr>
-                    <tr><td>Choose Narration Style</td><td><kbd>Ctrl</kbd> + <kbd>F1</kbd> through <kbd>F12</kbd> (see table below)</td></tr>
+                    <tr><td>Choose Narration Style</td><td><kbd>Ctrl</kbd> + <kbd>F1</kbd> through <kbd>F11</kbd> (see table below)</td></tr>
+                    <tr><td>Set, Enable or Disable Your Custom Instruction</td><td><kbd>Ctrl</kbd> + <kbd>F12</kbd></td></tr>
+                    <tr><td>Show the Character List (builds it first if the video has none)</td><td><kbd>Ctrl</kbd> + <kbd>W</kbd></td></tr>
+                    <tr><td>Rebuild the Character List</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>W</kbd></td></tr>
                     <tr><td>Increase / Decrease Description Length</td><td><kbd>Ctrl</kbd> + <kbd>Page Up</kbd> / <kbd>Page Down</kbd></td></tr>
                 </tbody>
             </table>
@@ -109,7 +118,8 @@
                     <tr><td>Review / Copy Last Spoken Output</td><td><kbd>Ctrl</kbd> + <kbd>R</kbd></td></tr>
                     <tr><td>Announce Background Task Progress</td><td><kbd>Ctrl</kbd> + <kbd>I</kbd></td></tr>
                     <tr><td>Toggle Frame Grid Batching (tile multiple frames into 3x3 grid images; on by default)</td><td><kbd>Ctrl</kbd> + <kbd>C</kbd></td></tr>
-                    <tr><td>Announce Last Call's Token Usage (and cost, for Grok)</td><td><kbd>Ctrl</kbd> + <kbd>P</kbd></td></tr>
+                    <tr><td>Cycle Reasoning Effort: none, low, medium (only for models that have a reasoning effort setting; goes back to the model's default when a new file is opened or the model is changed)</td><td><kbd>Ctrl</kbd> + <kbd>E</kbd></td></tr>
+                    <tr><td>Announce Last Call's Token Usage (including cached input tokens and reasoning tokens when the provider reports any, and cost for Grok)</td><td><kbd>Ctrl</kbd> + <kbd>P</kbd></td></tr>
                     <tr><td>Open Help Manual in Browser</td><td><kbd>Ctrl</kbd> + <kbd>H</kbd></td></tr>
                 </tbody>
             </table>
@@ -133,7 +143,7 @@
                 </tbody>
             </table>
 
-            <h3>Narration Styles (Ctrl+F1-F12)</h3>
+            <h3>Narration Styles (Ctrl+F1-F11)</h3>
             <table>
                 <thead>
                     <tr><th scope="col">Key</th><th scope="col">Style</th></tr>
@@ -150,7 +160,6 @@
                     <tr><td><kbd>Ctrl+F9</kbd></td><td>Poetic & Lyrical</td></tr>
                     <tr><td><kbd>Ctrl+F10</kbd></td><td>Cinematic & Epic</td></tr>
                     <tr><td><kbd>Ctrl+F11</kbd></td><td>Romantic & Emotional</td></tr>
-                    <tr><td><kbd>Ctrl+F12</kbd></td><td>Action & Fast-Paced</td></tr>
                 </tbody>
             </table>
         </section>

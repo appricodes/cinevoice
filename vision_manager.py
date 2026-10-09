@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import QDialog
 from PySide6.QtMultimedia import QMediaPlayer
 
-from config import MAX_IMAGE_DIM, XAI_MAX_IMAGE_DIM, FRAME_GRID_SIZE, MP4_METADATA_EXTS
+from config import MAX_IMAGE_DIM, XAI_MAX_IMAGE_DIM, FRAME_GRID_SIZE, MP4_METADATA_EXTS, CAST_FRAME_COUNT, CAST_IMAGE_DIM, BLOCK_FRAME_COUNT
 from utils import clean_string, resize_to_max_dim, encode_frame, build_frame_grids
 from ui_components import ExistingDescriptionDialog
 import mp4_metadata
@@ -23,6 +23,7 @@ class VisionManager(QObject):
     fullStoryReady = Signal(str)
     streamChunkReady = Signal(str)
     lookaheadFailed = Signal(int, str)
+    castReady = Signal(str, object)  # media_path, list of people or an error string
 
     # How many messages of question/answer context travel with each request. Without a cap
     # the history grows for as long as the app is open -- auto-describe alone adds a turn
@@ -45,7 +46,14 @@ class VisionManager(QObject):
         self.current_playing_block = -1
         self.fetching_block = -1
         self.waiting_for_block = -1
-        
+
+        # Character list for the open video (Ctrl+W): [{"name", "appearance", "clothing"}],
+        # one entry per person per outfit. Sent with every prompt while it's non-empty.
+        self.cast = []
+        self._cast_heartbeat = QTimer(self)
+        self._cast_heartbeat.setInterval(30000)
+        self._cast_heartbeat.timeout.connect(self._on_cast_heartbeat)
+
         self.is_auto_describing = False
         self.auto_describe_timer = QTimer(self)
         self.auto_describe_timer.setInterval(5000)
@@ -61,6 +69,7 @@ class VisionManager(QObject):
         self.mw.custom_prompt_panel.cancelled.connect(self._on_custom_prompt_cancelled)
         self._story_was_playing = False
         self.mw.story_panel.closed.connect(self._on_story_panel_closed)
+        self.mw.story_panel.castToggled.connect(self._on_cast_toggled)
 
         self.grokResponseReady.connect(self.handle_grok_response)
         self.lookaheadBlockReady.connect(self.handle_lookahead_ready)
@@ -68,6 +77,7 @@ class VisionManager(QObject):
         self.fullStoryReady.connect(self.handle_full_story_ready)
         self.streamChunkReady.connect(self.handle_stream_chunk)
         self.lookaheadFailed.connect(self.handle_lookahead_failed)
+        self.castReady.connect(self.handle_cast_ready)
 
     def _append_history(self, role: str, content: str):
         """Records one conversation turn, keeping only the most recent MAX_HISTORY_MESSAGES."""
@@ -105,14 +115,15 @@ class VisionManager(QObject):
     def _is_xai_model(self) -> bool:
         return self.mw.current_model_dict.get("provider_id") == "grok"
 
-    def _prepare_frames_for_api(self, raw_frames: list) -> tuple:
+    def _prepare_frames_for_api(self, raw_frames: list, force_grid: bool = False) -> tuple:
         """
         Turns freshly captured OpenCV frames into the final base64 JPEG images to send.
 
         When more than one frame is captured and frame-grid batching (Ctrl+C) is on, frames
         are tiled into as few images as possible -- up to FRAME_GRID_SIZE^2 per image, e.g. 90
         frames as 10 images of a 3x3 grid each -- instead of one image per frame. Off, or with
-        a single frame, each frame is sent as its own image exactly as before.
+        a single frame, each frame is sent as its own image exactly as before. force_grid tiles
+        regardless of Ctrl+C, for callers whose frame count is chosen to fill whole grids.
 
         A Grok model additionally gets every outgoing image (grid or not) downscaled to
         XAI_MAX_IMAGE_DIM, since that's the tile size its vision encoder uses internally.
@@ -123,7 +134,7 @@ class VisionManager(QObject):
         thumbnails = [resize_to_max_dim(f, MAX_IMAGE_DIM) for f in raw_frames]
 
         grid_note = ""
-        if len(thumbnails) > 1 and self.mw.grid_frames_enabled:
+        if len(thumbnails) > 1 and (self.mw.grid_frames_enabled or force_grid):
             cells_per_image = FRAME_GRID_SIZE * FRAME_GRID_SIZE
             images = build_frame_grids(thumbnails, cells_per_image)
             grid_note = (
@@ -147,13 +158,16 @@ class VisionManager(QObject):
         if not self.mw.media_path: return False
         return os.path.splitext(self.mw.media_path)[1].lower() in MP4_METADATA_EXTS
 
-    def _update_embedded_metadata(self, **updates) -> bool:
+    def _update_embedded_metadata(self, media_path: str = None, **updates) -> bool:
         """Read-modify-write the embedded metadata box so a block-description save doesn't
-        clobber the full story (and vice versa) -- both live in the same box."""
+        clobber the full story (and vice versa) -- both live in the same box. media_path
+        defaults to the open video; a worker passes the one it started on, in case the user
+        has opened another video since."""
+        media_path = media_path or self.mw.media_path
         with self._embedded_meta_lock:
-            data = mp4_metadata.read_metadata(self.mw.media_path)
+            data = mp4_metadata.read_metadata(media_path)
             data.update(updates)
-            return mp4_metadata.write_metadata(self.mw.media_path, data)
+            return mp4_metadata.write_metadata(media_path, data)
 
     def _migrate_legacy_sidecars_to_embedded(self):
         """
@@ -242,6 +256,23 @@ class VisionManager(QObject):
         if cur_ms is not None and cur_ms >= 0:
             self.start_prompt(cur_ms, self.mw.current_prompt_data)
     
+    def _with_cast(self, system_prompt: str) -> str:
+        """Appends the video's character list (Ctrl+W), if it has one and it's switched on, so people are called by name."""
+        if not self.cast or not self.mw.cast_enabled:
+            return system_prompt
+        return (f"{system_prompt} People in this video, identified earlier (someone seen in more than one "
+                f"outfit has one line per outfit, under the same name):\n{self._cast_text()}\n"
+                f"When someone you see matches a person on this list, refer to them by that name. Match by "
+                f"face and body first and clothing second, and pick the closest match. Someone who matches "
+                f"nobody on the list is described without a name.")
+
+    def _with_custom_instruction(self, system_prompt: str) -> str:
+        """Appends the user's standing instruction (Ctrl+F12) to a system prompt while it's enabled."""
+        instruction = self.mw.custom_instruction.strip() if self.mw.custom_instruction_enabled else ""
+        if not instruction:
+            return system_prompt
+        return f"{system_prompt} Additional instruction from the user, follow it in every reply: {instruction}"
+
     def _build_system_prompt(self, is_question: bool, frame_count: int, max_words: int) -> str:
         """
         Builds the system prompt for one request.
@@ -333,6 +364,7 @@ class VisionManager(QObject):
             )
             if grid_note:
                 system_prompt_string += " " + grid_note
+            system_prompt_string = self._with_custom_instruction(self._with_cast(system_prompt_string))
 
             with self._history_lock:
                 # Snapshot before appending: the current question is sent on its own below,
@@ -495,21 +527,23 @@ class VisionManager(QObject):
 
     def describe_block(self, media_path: str, block_idx: int) -> str:
         """
-        Describes the 30-second block at block_idx using 3 sampled frames, as live audio
-        description for a blind listener: only what is new in those 30 seconds, never a
-        re-description of what the preceding blocks already said. The descriptions of the
-        blocks just before this one are sent along so the model knows what is already known.
+        Describes the 30-second block at block_idx using BLOCK_FRAME_COUNT sampled frames,
+        always tiled into grid images (two 3x3 grids for 18 frames) whatever Ctrl+C is set to,
+        as live audio description for a blind listener: only what is new in those 30 seconds,
+        never a re-description of what the preceding blocks already said. The descriptions of
+        the blocks just before this one are sent along so the model knows what is already known.
         """
         import cv2
         start_ms = block_idx * 30000
+        step_ms = 30000 / BLOCK_FRAME_COUNT
         self.mw.updateStatus.emit(f"Extracting frames for 30s block {block_idx}...")
         raw_frames = []
         cap = cv2.VideoCapture(media_path)
         if not cap.isOpened():
             return f"Error: Cannot open video file {os.path.basename(media_path)}"
         try:
-            for i in range(3):
-                cap.set(cv2.CAP_PROP_POS_MSEC, float(start_ms + (i * 10000)))
+            for i in range(BLOCK_FRAME_COUNT):
+                cap.set(cv2.CAP_PROP_POS_MSEC, float(start_ms + (i * step_ms)))
                 ok, frame = cap.read()
                 if ok and frame is not None:
                     raw_frames.append(frame)
@@ -519,7 +553,7 @@ class VisionManager(QObject):
             cap.release()
 
         if not raw_frames: return "Error: No frames extracted."
-        frames_b64, grid_note = self._prepare_frames_for_api(raw_frames)
+        frames_b64, grid_note = self._prepare_frames_for_api(raw_frames, force_grid=True)
 
         prev_descs = self._recent_block_descriptions(block_idx)
 
@@ -559,6 +593,7 @@ class VisionManager(QObject):
                               f"\"\"\"\n{already}\n\"\"\"")
         if grid_note:
             system_prompt += " " + grid_note
+        system_prompt = self._with_custom_instruction(self._with_cast(system_prompt))
 
         try:
             self.mw.updateStatus.emit(f"Sending block {block_idx} to API...")
@@ -678,14 +713,20 @@ class VisionManager(QObject):
         self.mw.updateStatus.emit("Full video story ready.")
         self._show_story(text)
 
-    def _show_story(self, text: str):
-        """Pauses playback and opens the story in the main window's story panel; closing it
-        (Escape) resumes playback if it was playing."""
+    def _show_story(self, text: str, title: str = "Video story", cast_enabled: bool | None = None, prefix: str = ""):
+        """Pauses playback and opens text (the story, or the character list) in the main
+        window's story panel; closing it (Escape) resumes playback if it was playing.
+        cast_enabled, when given, also shows the character list's on/off button; prefix is
+        spoken before the usual announcement."""
         if not self.mw.story_panel.isVisible():
             self._story_was_playing = self.mw.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
             if self._story_was_playing: self.mw.player.pause()
-        self.mw.speak("Video story. Use the arrow keys to read, Escape to close.")
-        self.mw.story_panel.show_text(text)
+        if cast_enabled is None:
+            self.mw.speak(f"{prefix}{title}. Use the arrow keys to read, Escape to close.")
+        else:
+            self.mw.speak(f"{prefix}{title}, {'on' if cast_enabled else 'off'}. Use the arrow keys to read, "
+                          f"Tab for the on/off button, Escape to close.")
+        self.mw.story_panel.show_text(text, title, cast_enabled)
 
     def _on_story_panel_closed(self):
         if self._story_was_playing: self.mw.player.play()
@@ -787,6 +828,7 @@ class VisionManager(QObject):
                 user_text = "Watch the entire sequence and narrate the unfolding events fluidly from beginning to end."
             if grid_note:
                 system_prompt += " " + grid_note
+            system_prompt = self._with_custom_instruction(self._with_cast(system_prompt))
             self.mw.updateStatus.emit("Sending frames to API...")
             response = self.mw.api_client.send(
                 model_dict=self.mw.current_model_dict,
@@ -819,3 +861,194 @@ class VisionManager(QObject):
             self.mw.updateStatus.emit(f"Error generating full story: {e}")
         finally:
             self._inflight = False
+
+    # ---- Character list (Ctrl+W builds or shows it, Ctrl+Shift+W rebuilds it) ----
+
+    @staticmethod
+    def _clean_cast(people) -> list:
+        """Keeps only well-formed entries with a name, as plain {"name", "appearance", "clothing"} strings."""
+        cast = []
+        for p in people if isinstance(people, list) else []:
+            if not isinstance(p, dict):
+                continue
+            entry = {k: str(p.get(k) or "").strip() for k in ("name", "appearance", "clothing")}
+            if entry["name"]:
+                cast.append(entry)
+        return cast
+
+    def _cast_text(self) -> str:
+        """The character list as one line per person per outfit, a person's outfits kept together."""
+        order = list(dict.fromkeys(p["name"] for p in self.cast))
+        people = sorted(self.cast, key=lambda p: order.index(p["name"]))
+        lines = []
+        for p in people:
+            line = f"{p['name']}: {p['appearance']}"
+            if p["clothing"]:
+                line += f" -- {p['clothing']}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def load_cast(self):
+        """Loads the character list saved for the open video: embedded in the file itself for
+        MP4/MOV, or a sidecar .cast.json for other containers."""
+        self.cast = []
+        if not self.mw.media_path: return
+        if self._uses_embedded_metadata():
+            people = mp4_metadata.read_metadata(self.mw.media_path).get("cast", [])
+        else:
+            try:
+                with open(self.mw.get_data_file_path(".cast.json"), 'r', encoding='utf-8') as f:
+                    people = json.load(f)
+            except Exception:
+                people = []
+        self.cast = self._clean_cast(people)
+
+    def build_cast(self, force_regenerate: bool = False):
+        """
+        Ctrl+W: shows this video's character list, building it first if there isn't one yet.
+        Ctrl+Shift+W (force_regenerate): builds it again from scratch, replacing the saved one.
+        """
+        if not self.mw.media_path:
+            self.mw.speak("Please open a video file first.")
+            return
+        if self.cast and not force_regenerate:
+            self._show_story(self._cast_text(), "Character list", self.mw.cast_enabled)
+            return
+        # 32 full-size frames and a structured reply are beyond what the small offline models
+        # handle; they still use a list built by an online model, though.
+        if self._is_local_model():
+            self.mw.speak("Building the character list needs an online model. Press Ctrl+M to choose one.")
+            return
+        if self._inflight:
+            self.mw.speak("A vision process is already running.")
+            return
+
+        self.mw.speak("Identifying the people in this video. This can take a few minutes.")
+        self._inflight = True
+        self._cast_heartbeat.start()
+        cast_path = None if self._uses_embedded_metadata() else self.mw.get_data_file_path(".cast.json")
+        threading.Thread(target=self._cast_worker, args=(self.mw.media_path, cast_path), daemon=True).start()
+
+    def _cast_worker(self, media_path: str, cast_path: str | None):
+        import cv2
+        try:
+            cap = cv2.VideoCapture(media_path)
+            if not cap.isOpened():
+                self.castReady.emit(media_path, "Error: Cannot open video file.")
+                return
+            raw_frames = []
+            try:
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                dur_ms = int((frame_count / fps) * 1000) if fps > 0 else self.mw.player.duration()
+                if dur_ms <= 0:
+                    self.castReady.emit(media_path, "Error: Unknown video duration.")
+                    return
+                self.mw.updateStatus.emit(f"Extracting {CAST_FRAME_COUNT} frames for the character list...")
+                # Each frame sits in the middle of its slice of the video, so the very first
+                # and last moments (often black or titles) aren't picked.
+                for i in range(CAST_FRAME_COUNT):
+                    cap.set(cv2.CAP_PROP_POS_MSEC, (i + 0.5) * dur_ms / CAST_FRAME_COUNT)
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        raw_frames.append(frame)
+            finally:
+                cap.release()
+            if not raw_frames:
+                self.castReady.emit(media_path, "Error: No frames extracted.")
+                return
+
+            max_dim = XAI_MAX_IMAGE_DIM if self._is_xai_model() else CAST_IMAGE_DIM
+            frames_b64 = [encode_frame(resize_to_max_dim(f, max_dim), quality=90) for f in raw_frames]
+
+            system_prompt = (
+                f"You are building the character list for a video, so that every later description of it calls the same people by the same names. "
+                f"You are given {len(raw_frames)} frames spread evenly across the whole video, oldest first, one image per frame. "
+                f"INSTRUCTIONS: "
+                f"1. Find every distinct person in the frames. Skip crowds and people too small or blurred to tell apart. "
+                f"2. Recognize the same person across frames by face and body -- face shape and features, hair, skin tone, age, build -- never by clothing: the same person may appear in different outfits. "
+                f"3. Give each distinct person one short first name, different from everyone else's. If their real name is clearly shown on screen (a caption, a name tag, credits), use that instead. "
+                f"Otherwise choose common English or international first names (such as Emma, Daniel, Sara, Leo), "
+                f"unless something in the frames shows that the people are Iranian -- Persian writing on signs, screens or documents, an Iranian flag or setting, "
+                f"or clothing typical of Iran such as a chador or a manteau with a headscarf -- in which case choose common Persian first names (such as Maryam, Reza, Neda, Ali). "
+                f"4. Write one entry per person per outfit: someone seen in two different outfits gets two entries with the same name and the same appearance, each with its own clothing. "
+                f"5. 'appearance' describes the body in enough detail to recognize the person without their clothes: sex, approximate age, skin tone, hair color, length and style, facial hair, "
+                f"face shape and notable facial features, height and build (slim, heavy, muscular...), body proportions such as bust, waist and hips, and any distinctive marks such as tattoos, "
+                f"piercings, earrings, glasses, scars or birthmarks. "
+                f"6. 'clothing' describes that one outfit: garments and their colors, footwear and accessories. "
+                f"7. Be brief: short comma-separated phrases, not sentences; 'appearance' under 40 words and 'clothing' under 15 words. "
+                f"8. Report only what is actually visible; never guess. Always write names in the Latin alphabet, whatever the language; write appearance and clothing in {self.mw.current_language}. "
+                f"Reply with only a JSON object of this form: "
+                f"{{\"people\": [{{\"name\": \"...\", \"appearance\": \"...\", \"clothing\": \"...\"}}]}}. If nobody appears, reply {{\"people\": []}}."
+            )
+            self.mw.updateStatus.emit("Sending frames for the character list...")
+            response = self.mw.api_client.send(
+                model_dict=self.mw.current_model_dict,
+                frames_b64=frames_b64,
+                system_prompt=system_prompt,
+                user_text_blocks=["Build the character list for this video, as JSON."],
+                expect_json=True,
+                language=self.mw.current_language
+            )
+            if not isinstance(response, dict) or "choices" not in response:
+                error = response.get("error") if isinstance(response, dict) else None
+                self.castReady.emit(media_path, f"Error: {error or 'Failed to build the character list.'}")
+                return
+
+            # Parsed from the outermost braces, in case the model wraps the JSON in prose or a code fence.
+            text = response["choices"][0]["message"]["content"] or ""
+            try:
+                data = json.loads(text[text.find("{"):text.rfind("}") + 1])
+                cast = self._clean_cast(data.get("people"))
+            except (ValueError, AttributeError):
+                self.castReady.emit(media_path, "Error: The model's reply could not be read as a character list.")
+                return
+
+            if cast_path is None:
+                saved = self._update_embedded_metadata(media_path, cast=cast)
+            else:
+                try:
+                    os.makedirs(os.path.dirname(cast_path), exist_ok=True)
+                    with open(cast_path, 'w', encoding='utf-8') as f:
+                        json.dump(cast, f, indent=2, ensure_ascii=False)
+                    saved = True
+                except Exception:
+                    saved = False
+            self.castReady.emit(media_path, (cast, saved))
+        except Exception as e:
+            self.castReady.emit(media_path, f"Error building the character list: {e}")
+        finally:
+            self._inflight = False
+
+    def _on_cast_toggled(self, enabled: bool):
+        """The on/off button on the Ctrl+W panel: whether the character list goes with every request."""
+        self.mw.cast_enabled = enabled
+        self.mw.q_settings.setValue("cast_enabled", enabled)
+        self.mw.speak("Character list on." if enabled else "Character list off.")
+
+    def _on_cast_heartbeat(self):
+        """Every 30 seconds while the character list is being built, so a long wait isn't
+        mistaken for a hang. Skipped while the user is typing a question, since speak()
+        moves focus to the video."""
+        if not self.mw.custom_prompt_panel.isVisible():
+            self.mw.speak("Still identifying the people in this video.")
+
+    @Slot(str, object)
+    def handle_cast_ready(self, media_path: str, result):
+        """result is an error string, or (list of people, whether it was saved with the video)."""
+        self._cast_heartbeat.stop()
+        if isinstance(result, str):
+            self.mw.updateStatus.emit(result)
+            self.mw.speak(result)
+            return
+        # The user may have opened another video while this one was being analysed; the list
+        # is saved with its own video, but mustn't be applied to the one now open.
+        if media_path != self.mw.media_path:
+            return
+        self.cast, saved = result
+        self.mw.updateStatus.emit("Character list ready.")
+        not_saved = "" if saved else "The list could not be saved with the video, so it lasts only until the video is closed. "
+        if not self.cast:
+            self.mw.speak(f"No people were found in this video. {not_saved}")
+            return
+        self._show_story(self._cast_text(), "Character list", self.mw.cast_enabled, prefix=not_saved)
