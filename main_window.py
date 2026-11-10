@@ -23,6 +23,7 @@ from ui_components import ClickableSlider, SettingsDialog, LastOutputDialog, Com
 from transcription_manager import TranscriptionManager
 from vision_manager import VisionManager
 from grid_explorer import GridExplorer
+from body_explorer import BodyExplorer
 
 class VideoPlayerWidget(QWidget):
     updateStatus = Signal(str)
@@ -143,6 +144,7 @@ class VideoPlayerWidget(QWidget):
         self.transcription_manager = TranscriptionManager(self)
         self.vision_manager = VisionManager(self)
         self.grid_explorer = GridExplorer(self)
+        self.body_explorer = BodyExplorer(self)
 
         if self.media_path:
             self.load_video(self.media_path)
@@ -229,6 +231,7 @@ class VideoPlayerWidget(QWidget):
         
         self.transcription_manager.reset_state()
         self.grid_explorer.stop(resume=False)
+        self.body_explorer.stop(resume=False)
         self.vision_manager.lookahead_mode = False
         # Ctrl+E lasts for one file only: a new file goes back to the default from config.py.
         self.api_client.reasoning_effort_override = None
@@ -271,6 +274,7 @@ class VideoPlayerWidget(QWidget):
             "Ask Text Question (Ctrl+A)": self.vision_manager.show_custom_prompt_dialog,
             "Explore the Picture with the Mouse (Ctrl+Q or click)": self.grid_explorer.start,
             "Change Picture Grid Size: 4x3, 8x6, 12x9 (Ctrl+Shift+Q)": self.grid_explorer.cycle_size,
+            "Explore Body Parts with the Mouse (Ctrl+B)": self.body_explorer.start,
             "Custom Instruction (Ctrl+F12)": self.edit_custom_instruction,
             "Repeat Last Output (Ctrl+R)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier)),
             "Toggle Frame Grid Batching (Ctrl+C)": lambda: self.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)),
@@ -609,6 +613,8 @@ class VideoPlayerWidget(QWidget):
                 self.cycle_reasoning_effort()
             elif key == Qt.Key.Key_Q:
                 self.grid_explorer.start()
+            elif key == Qt.Key.Key_B:
+                self.body_explorer.start()
             elif key == Qt.Key.Key_P:
                 info = self.api_client.last_call_info
                 usage = info.get("usage") if info else None
@@ -659,6 +665,8 @@ class VideoPlayerWidget(QWidget):
         elif not has_ctrl and not has_shift and not has_alt:
             if key in (Qt.Key.Key_Space, Qt.Key.Key_Escape) and self.grid_explorer.is_engaged():
                 self.grid_explorer.stop()
+            elif key in (Qt.Key.Key_Space, Qt.Key.Key_Escape) and self.body_explorer.is_engaged():
+                self.body_explorer.stop()
             elif key == Qt.Key.Key_Home:
                 self.player.setPosition(0)
                 self.speak("Moved to beginning.")
