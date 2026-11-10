@@ -16,8 +16,11 @@ so a mouse position maps straight to "person 2, left forearm" with a single arra
 lookup -- see `PartMap.describe()`. Inference is the slow part (seconds on CPU), the
 lookup is free, so analyze one paused frame and keep the result.
 """
+import contextlib
+import hashlib
 import os
 import threading
+import urllib.request
 
 import cv2
 import numpy as np
@@ -29,6 +32,78 @@ DEFAULT_MODEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "models", "densepose", "densepose_r50_fpn_dl.torchscript",
 )
+
+# The model is 265 MB, far too big for the repository, so it is fetched on first use.
+# The digest is the one Hugging Face publishes for this blob (its X-Linked-ETag), checked
+# before the file is put in place: a truncated or tampered download never gets loaded.
+MODEL_URL = ("https://huggingface.co/LayerNorm/DensePose-TorchScript-with-hint-image"
+             "/resolve/main/densepose_r50_fpn_dl.torchscript")
+MODEL_SHA256 = "4f7260daa498ce8d4b4679f0692ef2f1f426e39121a907181eab37b8b0585878"
+MODEL_BYTES = 265257836
+
+
+class DownloadCancelled(Exception):
+    """Raised when the caller's `cancelled` callback asks for the download to stop."""
+
+
+def _sha256_of(path, chunk=1 << 20):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_model(path=DEFAULT_MODEL_PATH, url=MODEL_URL, expected_sha256=MODEL_SHA256,
+                   progress=None, cancelled=None, timeout=30):
+    """
+    Fetch the model to `path`, resuming a half-finished download and verifying the result.
+
+    The bytes go to a `.part` file next to the target and are only renamed into place once
+    the digest matches, so an interrupted or corrupted download can never be mistaken for
+    an installed model -- and a later attempt picks up with a Range request where this one
+    stopped instead of starting the 265 MB over.
+
+    `progress(done, total)` is called as the bytes arrive, and `cancelled()` is polled;
+    returning true from it raises DownloadCancelled and keeps the part file for next time.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    partial = path + ".part"
+    have = os.path.getsize(partial) if os.path.isfile(partial) else 0
+
+    request = urllib.request.Request(url, headers={"User-Agent": "cinevoice"})
+    if have:
+        request.add_header("Range", "bytes={}-".format(have))
+    with contextlib.closing(urllib.request.urlopen(request, timeout=timeout)) as response:
+        # A server that ignores the Range header answers 200 with the whole file; trust the
+        # status rather than the request, or the part file would end up with a seam in it.
+        resuming = response.status == 206
+        if not resuming:
+            have = 0
+        remaining = response.headers.get("Content-Length")
+        total = (have + int(remaining)) if remaining is not None else MODEL_BYTES
+        with open(partial, "ab" if resuming else "wb") as handle:
+            if not resuming:
+                handle.truncate(0)
+            while True:
+                if cancelled is not None and cancelled():
+                    raise DownloadCancelled()
+                block = response.read(1 << 20)
+                if not block:
+                    break
+                handle.write(block)
+                have += len(block)
+                if progress is not None:
+                    progress(have, total)
+
+    actual = _sha256_of(partial)
+    if expected_sha256 and actual != expected_sha256:
+        os.remove(partial)
+        raise ValueError("Downloaded model does not match the expected checksum "
+                         "(got {}). The file was discarded.".format(actual[:16]))
+    os.replace(partial, path)
+    return path
 
 # DensePose splits the body surface into 24 charts. Most limbs get two chart indices,
 # one for the front face and one for the back, which is a distinction nobody wants in a
@@ -208,6 +283,18 @@ class DensePoseParts:
     def available(self):
         return os.path.isfile(self.model_path)
 
+    def partial_bytes(self):
+        """How much of an interrupted download is already on disk, 0 if none."""
+        partial = self.model_path + ".part"
+        return os.path.getsize(partial) if os.path.isfile(partial) else 0
+
+    def ensure_model(self, progress=None, cancelled=None):
+        """Download the model if it is not here yet. Returns True if it had to fetch it."""
+        if self.available():
+            return False
+        download_model(self.model_path, progress=progress, cancelled=cancelled)
+        return True
+
     def load(self):
         """Load the model, if it is not already loaded. Safe to call from any thread."""
         import torch
@@ -220,10 +307,9 @@ class DensePoseParts:
             if self._model is None:
                 if not self.available():
                     raise FileNotFoundError(
-                        "DensePose model not found at {}. Download "
-                        "densepose_r50_fpn_dl.torchscript from "
-                        "https://huggingface.co/LayerNorm/DensePose-TorchScript-with-hint-image"
-                        .format(self.model_path)
+                        "DensePose model not found at {}. Call ensure_model() to fetch it, "
+                        "or download densepose_r50_fpn_dl.torchscript by hand from {}"
+                        .format(self.model_path, MODEL_URL)
                     )
                 model = torch.jit.load(self.model_path, map_location=self.device)
                 model.eval()

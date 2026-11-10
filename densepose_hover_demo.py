@@ -44,6 +44,11 @@ def load_frame(path, index=0):
     return frame
 
 
+def _print_progress(done, total):
+    print("\r  {:5.1f}%  {:,} / {:,} bytes".format(done * 100.0 / max(total, 1), done, total),
+          end="", file=sys.stderr)
+
+
 class AnalyzeWorker(QObject):
     """Runs the model off the GUI thread -- inference takes a second or two on CPU."""
 
@@ -58,7 +63,12 @@ class AnalyzeWorker(QObject):
 
     def run(self):
         try:
-            part_map = DensePoseParts(detect_size=self.detect_size).analyze(self.frame)
+            engine = DensePoseParts(detect_size=self.detect_size)
+            if not engine.available():
+                print("Downloading the DensePose model, 265 MB, once...", file=sys.stderr)
+                engine.ensure_model(progress=_print_progress)
+                print("\nDone.", file=sys.stderr)
+            part_map = engine.analyze(self.frame)
             regions = part_map.regions(names=names_for_language(self.language))
             self.done.emit((part_map, regions))
         except Exception as exc:  # noqa: BLE001 - the demo should show the error, not die

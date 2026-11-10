@@ -119,7 +119,8 @@ class PartOverlay(QWidget):
 class BodyExplorer(QObject):
     """Mirrors GridExplorer, with a local DensePose pass in place of the AI grid call."""
 
-    exploreReady = Signal(int, object)  # request id, (regions, (frame_w, frame_h)) or an error
+    exploreReady = Signal(int, object)  # request id, the finished areas or an error string
+    announce = Signal(str, bool)        # text, and whether it also goes to the status line
 
     def __init__(self, main_window):
         super().__init__(main_window)
@@ -134,6 +135,7 @@ class BodyExplorer(QObject):
         # not pay on every start, so it is loaded the first time the feature is used.
         self._engine = None
         self.exploreReady.connect(self._on_ready)
+        self.announce.connect(self._on_announce)
         # Application-wide rather than on the video widget: QVideoWidget draws through an
         # embedded native window, whose mouse events never reach the widget itself.
         QApplication.instance().installEventFilter(self)
@@ -168,11 +170,6 @@ class BodyExplorer(QObject):
             # already running keeps the picture.
             self.mw.speak("Picture exploration is running. End it first.")
             return
-        if not self.model_installed():
-            self.mw.speak("The body model is not installed.")
-            self.mw.updateStatus.emit(
-                "DensePose model missing: expected models/densepose/densepose_r50_fpn_dl.torchscript")
-            return
         if importlib.util.find_spec("torch") is None:
             # Checked before the thread starts, so the reason is spoken rather than
             # arriving as an ImportError in the middle of the worker.
@@ -187,8 +184,23 @@ class BodyExplorer(QObject):
         self._last_text = None
         self._prev_window_state = self.mw.windowState()
         self.mw.showFullScreen()
-        self.mw.speak("Finding the people in the picture. Please wait.")
-        self.mw.updateStatus.emit("Finding body parts...")
+        if self.model_installed():
+            self.mw.speak("Finding the people in the picture. Please wait.")
+            self.mw.updateStatus.emit("Finding body parts...")
+        else:
+            # Said before the thread starts, so the wait is never unexplained. Escape or
+            # Space stops it, and what has already arrived is kept for the next attempt.
+            from densepose_parts import MODEL_BYTES
+            done = self._get_engine().partial_bytes()
+            left = max(1, (MODEL_BYTES - done) // (1024 * 1024))
+            unit = "megabyte" if left == 1 else "megabytes"
+            if done:
+                self.mw.speak("Carrying on with the body model download, {} {} left. "
+                              "Press Escape to stop.".format(left, unit))
+            else:
+                self.mw.speak("The body model is not here yet. Downloading it now, {} {}; "
+                              "this happens once. Press Escape to stop.".format(left, unit))
+            self.mw.updateStatus.emit("Downloading the body model ({} {} left)...".format(left, unit))
         threading.Thread(target=self._worker,
                          args=(self._request_id, self.mw.media_path, self.mw.player.position()),
                          daemon=True).start()
@@ -196,7 +208,10 @@ class BodyExplorer(QObject):
     def stop(self, resume=True):
         """Ends exploration (or abandons a pending request); resume=True restarts playback."""
         if self.state == PENDING and resume:
-            self.mw.speak("Body exploration cancelled.")
+            if self.model_installed():
+                self.mw.speak("Body exploration cancelled.")
+            else:
+                self.mw.speak("Download stopped. What has arrived is kept for next time.")
         self.state = IDLE
         self._request_id += 1
         self._remove_overlay()
@@ -210,9 +225,42 @@ class BodyExplorer(QObject):
         self.mw.setWindowState(self._prev_window_state)
         self._prev_window_state = None
 
+    def _download_callbacks(self, request_id):
+        """(progress, cancelled) for download_model, wired to speech and to stop()."""
+        # Only on a tenth of the file, so the download is audibly moving without talking
+        # over itself; a resumed one starts partway up and says so.
+        said = [-1]
+
+        def progress(done, total):
+            tenth = int(done * 10 / max(total, 1))
+            if tenth > said[0]:
+                said[0] = tenth
+                if 0 < tenth < 10:
+                    self.announce.emit("Body model {} percent.".format(tenth * 10), False)
+
+        def cancelled():
+            # stop() bumps the request id; that is what ends the download.
+            return request_id != self._request_id
+
+        return progress, cancelled
+
     def _worker(self, request_id, media_path, timestamp_ms):
         import cv2
+        from densepose_parts import DownloadCancelled
         try:
+            if not self.model_installed():
+                progress, cancelled = self._download_callbacks(request_id)
+                try:
+                    self._get_engine().ensure_model(progress=progress, cancelled=cancelled)
+                except DownloadCancelled:
+                    return
+                except Exception as e:
+                    self.exploreReady.emit(
+                        request_id, "Error: Could not download the body model: {}".format(e))
+                    return
+                if request_id != self._request_id:
+                    return
+                self.announce.emit("Body model ready. Finding the people in the picture.", True)
             cap = cv2.VideoCapture(media_path)
             try:
                 cap.set(cv2.CAP_PROP_POS_MSEC, float(timestamp_ms))
@@ -235,6 +283,15 @@ class BodyExplorer(QObject):
                                    (regions, n_people, person_word, (frame_w, frame_h)))
         except Exception as e:
             self.exploreReady.emit(request_id, "Error exploring the body: {}".format(e))
+
+    @Slot(str, bool)
+    def _on_announce(self, text, to_status):
+        """Progress from the worker thread, spoken on the GUI thread."""
+        if self.state != PENDING:
+            return
+        self.mw.speak(text)
+        if to_status:
+            self.mw.updateStatus.emit(text)
 
     @Slot(int, object)
     def _on_ready(self, request_id, result):
