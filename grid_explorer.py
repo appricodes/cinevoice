@@ -25,6 +25,46 @@ _OUTSIDE = "outside"
 _EMPTY_CELL = "Nothing described here."
 
 
+def _row_letter(r: int) -> str:
+    return chr(ord("A") + r)
+
+
+def _cell_label(r: int, c: int) -> str:
+    """A1 for the top-left cell: row letter, then 1-based column number."""
+    return f"{_row_letter(r)}{c + 1}"
+
+
+def _draw_grid(picture, cols: int, rows: int):
+    """
+    A copy of an OpenCV BGR picture with the cell borders drawn on it and each cell labelled
+    in its top-left corner. Asked only to imagine the grid, models place things in the wrong
+    cells and describe their neighbours; with the borders in sight they keep to each cell.
+    """
+    import cv2
+    img = picture.copy()
+    h, w = img.shape[:2]
+    thick = max(1, round(min(w, h) / 400))
+    xs = [round(c * w / cols) for c in range(cols + 1)]
+    ys = [round(r * h / rows) for r in range(rows + 1)]
+    # Yellow on a black outline, to stay visible over both light and dark scenes.
+    for x in xs[1:-1]:
+        cv2.line(img, (x, 0), (x, h - 1), (0, 0, 0), thick + 2)
+        cv2.line(img, (x, 0), (x, h - 1), (0, 255, 255), thick)
+    for y in ys[1:-1]:
+        cv2.line(img, (0, y), (w - 1, y), (0, 0, 0), thick + 2)
+        cv2.line(img, (0, y), (w - 1, y), (0, 255, 255), thick)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = max(0.3, min(0.8, min(w / cols, h / rows) / 120))
+    for r in range(rows):
+        for c in range(cols):
+            label = _cell_label(r, c)
+            (tw, th), base = cv2.getTextSize(label, font, scale, 1)
+            x, y = xs[c] + thick + 1, ys[r] + thick + 1
+            cv2.rectangle(img, (x, y), (x + tw + 4, y + th + base + 4), (0, 0, 0), -1)
+            cv2.putText(img, label, (x + 2, y + th + 2), font, scale, (255, 255, 255), 1, cv2.LINE_AA)
+    return img
+
+
 class _CellOverlay(QWidget):
     """
     A frameless window over the displayed picture holding one labelled object per cell, so a
@@ -141,6 +181,7 @@ class GridExplorer(QObject):
         self._prev_window_state = None
 
     def _system_prompt(self, cols: int, rows: int) -> str:
+        last_row = _row_letter(rows - 1)
         # The overall description is the one F2 ("Detail Desc") gives, at the same length and in
         # the same style, so arriving in the grid sounds like pressing F2 on the paused picture.
         f2 = settings.PROMPTS[1] if len(settings.PROMPTS) > 1 else {}
@@ -150,18 +191,23 @@ class GridExplorer(QObject):
                 f"First, for 'description': {f2_prompt} Describe it as a professional cinematic audio describer "
                 f"would, in a '{self.mw.current_mode}' style, in the immediate present tense, describing only what "
                 f"is actually, physically present; under {max_words} words. "
-                f"Then, for 'rows': "
-                f"Imagine the picture divided into a grid of equal cells, {cols} columns wide and {rows} rows high: "
-                f"rows 1 to {rows} from top to bottom, columns 1 to {cols} from left to right. For every cell, say briefly what is in that cell and what is "
-                f"right around it, so that moving from cell to cell builds a mental map of the whole picture. "
-                f"Name the people, objects and parts of them that fall in the cell (for example a woman's left hand "
-                f"holding a cup), their colors, and any visible text. If a cell holds only background, say what it is "
-                f"(sky, wall, floor...) and name the nearest notable thing and which direction it lies. "
-                f"Keep each cell under 15 words. Write everything in {self.mw.current_language}. "
-                f"Never use the words 'cell', 'grid', 'row', 'column', 'image', 'frame', 'picture' or 'shows'. "
-                f"Reply with only a JSON object of this form, where 'rows' holds {rows} inner lists, one per row "
-                f"from top to bottom, each with {cols} strings from left to right: "
-                f"{{\"description\": \"...\", \"rows\": [[\"...\", ...], ...]}}.")
+                f"Then, for 'cells': the picture has a grid of labelled cells drawn over it, {cols} columns and "
+                f"{rows} rows of equal cells. "
+                f"Each cell is labelled with a letter for its row, A to {last_row} from top to bottom, and a number "
+                f"for its column, 1 to {cols} from left to right: A1 is the top-left corner, {last_row}{cols} the "
+                f"bottom-right. The lines and labels only mark the cells; they are not part of the scene. "
+                f"For every cell, look at that cell's own area and say only what lies inside its borders -- never "
+                f"what is in neighbouring cells, and no directions to other things. Do use the whole picture to "
+                f"recognise what each part belongs to: a green stem whose flower is in the cell above is 'the stem "
+                f"of the red flower', not just 'a green line'. Name the people, objects and "
+                f"parts of them that fall within it as precisely as you can; if only part of something is inside, "
+                f"name that part (for example 'the man's right shoulder' or 'the left edge of a red sofa'), with "
+                f"colors and any visible text. If the cell holds only background, say just what it is (sky, wall, "
+                f"floor...). Keep each cell under 15 words. Write everything in {self.mw.current_language}. "
+                f"Never use the words 'cell', 'grid', 'row', 'column', 'image', 'frame', 'picture' or 'shows', and "
+                f"never mention the labels or the lines. Reply with only a JSON object of this form, with an entry "
+                f"for every one of the {cols * rows} labels: "
+                f"{{\"description\": \"...\", \"cells\": {{\"A1\": \"...\", \"A2\": \"...\", ...}}}}.")
 
     def _worker(self, request_id: int, media_path: str, timestamp_ms: int, size: tuple):
         cols, rows = size
@@ -180,14 +226,16 @@ class GridExplorer(QObject):
 
             vm = self.mw.vision_manager
             max_dim = XAI_MAX_IMAGE_DIM if vm._is_xai_model() else GRID_EXPLORE_IMAGE_DIM
-            frame_b64 = encode_frame(resize_to_max_dim(frame, max_dim), quality=90)
+            # One image only: the whole picture with the grid drawn over it, so every cell is
+            # read in the context of everything around it.
+            gridded = _draw_grid(resize_to_max_dim(frame, max_dim), cols, rows)
             system_prompt = vm._with_custom_instruction(vm._with_cast(self._system_prompt(cols, rows)))
 
             response = self.mw.api_client.send(
                 model_dict=self.mw.current_model_dict,
-                frames_b64=[frame_b64],
+                frames_b64=[encode_frame(gridded, quality=90)],
                 system_prompt=system_prompt,
-                user_text_blocks=["Describe each part of this picture, as JSON."],
+                user_text_blocks=["Describe the scene, then each labelled cell, as JSON."],
                 expect_json=True,
                 language=self.mw.current_language
             )
@@ -213,15 +261,14 @@ class GridExplorer(QObject):
         # Parsed from the outermost braces, in case the model wraps the JSON in prose or a code fence.
         try:
             data = json.loads(text[text.find("{"):text.rfind("}") + 1])
-            reply = data.get("rows")
+            reply = data.get("cells")
         except (ValueError, AttributeError):
             return None
-        if not isinstance(reply, list) or not reply:
+        if not isinstance(reply, dict) or not reply:
             return None
-        cells = []
-        for r in range(rows):
-            row = reply[r] if r < len(reply) and isinstance(reply[r], list) else []
-            cells.append([clean_string(str(row[c])) if c < len(row) and row[c] else "" for c in range(cols)])
+        # Labels matched case- and space-insensitively ("a1", "A 1").
+        reply = {str(k).replace(" ", "").upper(): v for k, v in reply.items()}
+        cells = [[clean_string(str(reply.get(_cell_label(r, c)) or "")) for c in range(cols)] for r in range(rows)]
         return clean_string(str(data.get("description") or "")), cells
 
     @Slot(int, object)
@@ -305,11 +352,13 @@ class GridExplorer(QObject):
         global_pos = event.globalPosition().toPoint()
         if t == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton and self._over_video(obj, global_pos):
-                # A click toggles: starts exploring, or ends it like Space/Escape.
-                if self.state == IDLE:
-                    self.start()
-                else:
+                # A click toggles: starts exploring, or ends it like Space/Escape. While the
+                # body explorer has the picture, the click belongs to it, not to the grid.
+                body = getattr(self.mw, "body_explorer", None)
+                if self.state != IDLE:
                     self.stop()
+                elif body is None or not body.is_engaged():
+                    self.start()
         elif self.state == ACTIVE and not QAccessible.isActive():
             # No screen reader to track the mouse over the overlay: read the cell ourselves.
             # QTextToSpeech.say() cuts off whatever it was still saying.
